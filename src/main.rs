@@ -1,14 +1,16 @@
-use axum::extract::Query;
-use axum::routing::get;
-use axum::{extract::State, routing::post, Json, Router};
+use askama::Template;
+use axum::{
+    extract::State,
+    response::Html,
+    routing::{get, post},
+    Json, Router,
+};
 use base64::engine::{general_purpose::URL_SAFE, Engine};
-use ring::rand::SecureRandom;
 use ring::{rand, signature};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::{env, net::SocketAddr, path::PathBuf};
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
@@ -31,6 +33,10 @@ struct AppState {
     store: Arc<Mutex<AuthStore>>,
     rng: Arc<rand::SystemRandom>,
 }
+
+#[derive(Template)]
+#[template(path = "index.html")]
+struct IndexTemplate;
 
 #[derive(Serialize)]
 struct RegistrationOptions {
@@ -70,6 +76,42 @@ struct RegisterCredential {
 struct AuthenticatorAttestationResponse {
     client_data_json: String,
     attestation_object: String,
+}
+
+#[derive(Serialize)]
+struct AuthenticationOptions {
+    challenge: String,
+    timeout: u32,
+    rp_id: String,
+    allow_credentials: Vec<AllowCredential>,
+    user_verification: String,
+}
+
+#[derive(Serialize)]
+struct AllowCredential {
+    r#type: String,
+    id: String,
+}
+
+#[derive(Deserialize)]
+struct AuthenticateCredential {
+    id: String,
+    raw_id: String,
+    response: AuthenticatorAssertionResponse,
+    #[serde(rename = "type")]
+    type_: String,
+}
+
+#[derive(Deserialize)]
+struct AuthenticatorAssertionResponse {
+    authenticator_data: String,
+    client_data_json: String,
+    signature: String,
+}
+
+async fn index() -> Html<String> {
+    let template = IndexTemplate {};
+    Html(template.render().unwrap())
 }
 
 async fn start_registration(
@@ -136,37 +178,6 @@ async fn finish_registration(
     "Registration successful"
 }
 
-#[derive(Serialize)]
-struct AuthenticationOptions {
-    challenge: String,
-    timeout: u32,
-    rp_id: String,
-    allow_credentials: Vec<AllowCredential>,
-    user_verification: String,
-}
-
-#[derive(Serialize)]
-struct AllowCredential {
-    r#type: String,
-    id: String,
-}
-
-#[derive(Deserialize)]
-struct AuthenticateCredential {
-    id: String,
-    raw_id: String,
-    response: AuthenticatorAssertionResponse,
-    #[serde(rename = "type")]
-    type_: String,
-}
-
-#[derive(Deserialize)]
-struct AuthenticatorAssertionResponse {
-    authenticator_data: String,
-    client_data_json: String,
-    signature: String,
-}
-
 async fn start_authentication(State(state): State<AppState>) -> Json<AuthenticationOptions> {
     let mut challenge = vec![0u8; 32];
     state.rng.fill(&mut challenge).unwrap();
@@ -217,11 +228,6 @@ async fn verify_authentication(
     "Authentication successful"
 }
 
-
-async fn root() -> &'static str {
-    "Hello, World!"
-}
-
 #[tokio::main]
 async fn main() {
     let state = AppState {
@@ -230,14 +236,14 @@ async fn main() {
     };
 
     let app = Router::new()
-        .route("/", get(root))
+        .route("/", get(index))
         .route("/register/start", post(start_registration))
         .route("/register/finish", post(finish_registration))
         .route("/auth/start", post(start_authentication))
         .route("/auth/verify", post(verify_authentication))
         .with_state(state);
 
-    // run our app with hyper, listening globally on port 3000
+    println!("Starting server on http://localhost:3000");
     let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await.unwrap();
     axum::serve(listener, app).await.unwrap();
 }

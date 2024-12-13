@@ -1,0 +1,11 @@
+// templates/index.html
+{% extends "base.html" %}
+
+{% block content %}
+<h1>Passkey Registration</h1>
+<div>
+    <label for="username">Username:</label>
+    <input type="text" id="username" name="username">
+    <button onclick="startRegistration()">Register with Passkey</button>
+</div>
+{% endblock %}

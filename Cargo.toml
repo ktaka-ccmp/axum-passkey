@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+askama = { version = "0.12.1", features = ["serde-json", "with-axum"] }
 axum = { version = "0.7.9", features = ["http2", "macros", "multipart"] }
 axum-server = "0.7.1"
 base64 = "0.22.1"
