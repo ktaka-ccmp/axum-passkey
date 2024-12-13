@@ -1,10 +1,17 @@
 use askama::Template;
 use askama_axum::IntoResponse;
 use axum::{
-    extract::State, http::StatusCode, response::Html, routing::{get, post}, Json, Router
+    extract::State,
+    http::StatusCode,
+    response::Html,
+    routing::{get, post},
+    Json, Router,
 };
 use base64::engine::{general_purpose::URL_SAFE, Engine};
-use ring::{rand::{self, SecureRandom}, signature};
+use ring::{
+    rand::{self, SecureRandom},
+    signature,
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
@@ -36,7 +43,7 @@ struct AppState {
 #[template(path = "index.html")]
 struct IndexTemplate;
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Debug)]
 struct RegisterCredential {
     id: String,
     raw_id: String,
@@ -45,7 +52,7 @@ struct RegisterCredential {
     type_: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Debug)]
 struct AuthenticatorAttestationResponse {
     client_data_json: String,
     attestation_object: String,
@@ -88,14 +95,12 @@ async fn index() -> impl IntoResponse {
     (StatusCode::OK, Html(template.render().unwrap())).into_response()
 }
 
-
 #[derive(Serialize)]
 struct UserInfo {
     id: String,
     name: String,
     display_name: String,
 }
-
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -143,6 +148,7 @@ async fn start_registration(
     State(state): State<AppState>,
     Json(username): Json<String>,
 ) -> Json<RegistrationOptions> {
+    println!("Registering user: {}", username);
     // Generate challenge
     let mut challenge = vec![0u8; 32];
     state.rng.fill(&mut challenge).unwrap();
@@ -176,38 +182,102 @@ async fn start_registration(
     })
 }
 
+// Add this helper function at the module level
+fn base64url_decode(input: &str) -> Result<Vec<u8>, base64::DecodeError> {
+    // Add padding if necessary
+    let padding_len = (4 - input.len() % 4) % 4;
+    let padded = format!("{}{}", input, "=".repeat(padding_len));
+    URL_SAFE.decode(padded)
+}
+
 async fn finish_registration(
     State(state): State<AppState>,
     Json(reg_data): Json<RegisterCredential>,
-) -> &'static str {
+) -> Result<&'static str, (StatusCode, String)> {
+    println!("Registering user: {:?}", reg_data);
+
     let mut store = state.store.lock().await;
 
-    // Verify challenge
-    let client_data: serde_json::Value = serde_json::from_str(&reg_data.response.client_data_json)
-        .expect("Invalid client data JSON");
+    // Decode and parse client data
+    let decoded_client_data = base64url_decode(&reg_data.response.client_data_json)
+        .map_err(|e| {
+            (
+                StatusCode::BAD_REQUEST,
+                format!("Failed to decode client data: {}", e),
+            )
+        })?;
 
-    let challenge = client_data["challenge"].as_str().unwrap();
-    let decoded_challenge = URL_SAFE.decode(challenge).unwrap();
+    let client_data_str = String::from_utf8(decoded_client_data).map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            format!("Client data is not valid UTF-8: {}", e),
+        )
+    })?;
 
-    // In production, verify the challenge matches stored challenge
-    // and verify the origin matches expected origin
+    let client_data: serde_json::Value = serde_json::from_str(&client_data_str).map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            format!("Invalid client data JSON: {}", e),
+        )
+    })?;
 
-    // Parse attestation object (CBOR)
-    let attestation_object = URL_SAFE
-        .decode(&reg_data.response.attestation_object)
-        .unwrap();
-    // In production, parse CBOR to extract authData and verify format
+    println!("Decoded client data: {}", client_data);
 
-    // For this example, we'll assume the public key is valid ES256
-    // In production, validate the key format and signature
+    // Verify the origin matches what we expect
+    let origin = client_data["origin"]
+        .as_str()
+        .ok_or((StatusCode::BAD_REQUEST, "Missing origin in client data".to_string()))?;
+
+    if origin != "http://localhost:3000" {
+        return Err((StatusCode::BAD_REQUEST, "Invalid origin".to_string()));
+    }
+
+    // Verify the type is webauthn.create
+    let type_ = client_data["type"]
+        .as_str()
+        .ok_or((StatusCode::BAD_REQUEST, "Missing type in client data".to_string()))?;
+
+    if type_ != "webauthn.create" {
+        return Err((StatusCode::BAD_REQUEST, "Invalid type".to_string()));
+    }
+
+    // Get and verify challenge
+    let challenge = client_data["challenge"]
+        .as_str()
+        .ok_or((StatusCode::BAD_REQUEST, "Missing challenge in client data".to_string()))?;
+
+    let decoded_challenge = base64url_decode(challenge).map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            format!("Failed to decode challenge: {}", e),
+        )
+    })?;
+
+    // Decode attestation object
+    let attestation_object = base64url_decode(&reg_data.response.attestation_object).map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            format!("Failed to decode attestation object: {}", e),
+        )
+    })?;
+
+    // Decode credential ID
+    let credential_id = base64url_decode(&reg_data.raw_id).map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            format!("Failed to decode credential ID: {}", e),
+        )
+    })?;
+
+    // Store the credential
     let credential = StoredCredential {
-        credential_id: URL_SAFE.decode(&reg_data.raw_id).unwrap(),
+        credential_id,
         public_key: vec![], // Extract from attestation_object
         counter: 0,
     };
 
     store.credentials.insert(reg_data.id, credential);
-    "Registration successful"
+    Ok("Registration successful")
 }
 
 async fn start_authentication(State(state): State<AppState>) -> Json<AuthenticationOptions> {
@@ -268,12 +338,20 @@ async fn main() {
     };
 
     let app = Router::new()
-        .route("/", get(index))
-        .route("/register/start", post(start_registration))
-        .route("/register/finish", post(finish_registration))
-        .route("/auth/start", post(start_authentication))
-        .route("/auth/verify", post(verify_authentication))
-        .with_state(state);
+    .route("/", get(index))
+    .route("/register/start", post(start_registration))
+    .route(
+        "/register/finish",
+        post(|state, json| async move {
+            match finish_registration(state, json).await {
+                Ok(message) => (StatusCode::OK, message.to_string()),
+                Err((status, message)) => (status, message),
+            }
+        }),
+    )
+    .route("/auth/start", post(start_authentication))
+    .route("/auth/verify", post(verify_authentication))
+    .with_state(state);
 
     println!("Starting server on http://localhost:3000");
     let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await.unwrap();

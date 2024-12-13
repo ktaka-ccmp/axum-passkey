@@ -21,6 +21,8 @@
 
                 const options = await startResponse.json();
 
+                console.log('Credential creation options:', options);
+
                 // Convert base64url strings to Uint8Array
                 options.challenge = base64URLToUint8Array(options.challenge);
                 options.user.id = base64URLToUint8Array(options.user.id);
@@ -28,6 +30,8 @@
                 const credential = await navigator.credentials.create({
                     publicKey: options
                 });
+
+                console.log('Credential created:', credential);
 
                 // Convert credential data for sending to server
                 const credentialResponse = {
@@ -40,6 +44,8 @@
                     }
                 };
 
+                console.log('Credential response:', credentialResponse);
+                
                 const finishResponse = await fetch('/register/finish', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
