@@ -19,6 +19,9 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
+use dotenv::dotenv;
+use std::env;
+
 // Store challenge and credential data
 #[derive(Default)]
 struct AuthStore {
@@ -34,9 +37,17 @@ struct StoredCredential {
 }
 
 #[derive(Clone)]
+struct AppConfig {
+    origin: String,
+    rp_id: String,
+}
+
+// Update AppState to include config
+#[derive(Clone)]
 struct AppState {
     store: Arc<Mutex<AuthStore>>,
     rng: Arc<rand::SystemRandom>,
+    config: AppConfig,
 }
 
 #[derive(Template)]
@@ -143,10 +154,10 @@ async fn start_registration(
 
     Json(RegistrationOptions {
         challenge: URL_SAFE.encode(&challenge),
-        rp_id: "localhost".to_string(),
+        rp_id: state.config.rp_id.clone(),
         rp: RelyingParty {
             name: "Passkey Demo".to_string(),
-            id: "localhost".to_string(),
+            id: state.config.rp_id.clone(),
         },
         user: PublicKeyCredentialUserEntity {
             id: Uuid::new_v4().to_string(),
@@ -184,8 +195,8 @@ async fn finish_registration(
     let mut store = state.store.lock().await;
 
     // Decode and parse client data
-    let decoded_client_data = base64url_decode(&reg_data.response.client_data_json)
-        .map_err(|e| {
+    let decoded_client_data =
+        base64url_decode(&reg_data.response.client_data_json).map_err(|e| {
             (
                 StatusCode::BAD_REQUEST,
                 format!("Failed to decode client data: {}", e),
@@ -209,27 +220,30 @@ async fn finish_registration(
     println!("Decoded client data: {}", client_data);
 
     // Verify the origin matches what we expect
-    let origin = client_data["origin"]
-        .as_str()
-        .ok_or((StatusCode::BAD_REQUEST, "Missing origin in client data".to_string()))?;
+    let origin = client_data["origin"].as_str().ok_or((
+        StatusCode::BAD_REQUEST,
+        "Missing origin in client data".to_string(),
+    ))?;
 
-    if origin != "http://localhost:3000" {
+    if origin != state.config.origin {
         return Err((StatusCode::BAD_REQUEST, "Invalid origin".to_string()));
     }
 
     // Verify the type is webauthn.create
-    let type_ = client_data["type"]
-        .as_str()
-        .ok_or((StatusCode::BAD_REQUEST, "Missing type in client data".to_string()))?;
+    let type_ = client_data["type"].as_str().ok_or((
+        StatusCode::BAD_REQUEST,
+        "Missing type in client data".to_string(),
+    ))?;
 
     if type_ != "webauthn.create" {
         return Err((StatusCode::BAD_REQUEST, "Invalid type".to_string()));
     }
 
     // Get and verify challenge
-    let challenge = client_data["challenge"]
-        .as_str()
-        .ok_or((StatusCode::BAD_REQUEST, "Missing challenge in client data".to_string()))?;
+    let challenge = client_data["challenge"].as_str().ok_or((
+        StatusCode::BAD_REQUEST,
+        "Missing challenge in client data".to_string(),
+    ))?;
 
     let decoded_challenge = base64url_decode(challenge).map_err(|e| {
         (
@@ -239,12 +253,13 @@ async fn finish_registration(
     })?;
 
     // Decode attestation object
-    let attestation_object = base64url_decode(&reg_data.response.attestation_object).map_err(|e| {
-        (
-            StatusCode::BAD_REQUEST,
-            format!("Failed to decode attestation object: {}", e),
-        )
-    })?;
+    let attestation_object =
+        base64url_decode(&reg_data.response.attestation_object).map_err(|e| {
+            (
+                StatusCode::BAD_REQUEST,
+                format!("Failed to decode attestation object: {}", e),
+            )
+        })?;
 
     // Decode credential ID
     let credential_id = base64url_decode(&reg_data.raw_id).map_err(|e| {
@@ -308,7 +323,7 @@ async fn start_authentication(State(state): State<AppState>) -> Json<Authenticat
     Json(AuthenticationOptions {
         challenge: URL_SAFE.encode(&challenge),
         timeout: 60000,
-        rp_id: "localhost".to_string(),
+        rp_id: state.config.rp_id.clone(),
         allow_credentials,
         user_verification: "preferred".to_string(),
     })
@@ -320,18 +335,19 @@ async fn verify_authentication(
 ) -> Result<&'static str, (StatusCode, String)> {
     let store = state.store.lock().await;
 
-    let credential = store.credentials.get(&auth_data.id).ok_or((
-        StatusCode::BAD_REQUEST,
-        "Unknown credential".to_string(),
-    ))?;
+    let credential = store
+        .credentials
+        .get(&auth_data.id)
+        .ok_or((StatusCode::BAD_REQUEST, "Unknown credential".to_string()))?;
 
     // Decode and verify client data
-    let decoded_client_data = base64url_decode(&auth_data.response.client_data_json).map_err(|e| {
-        (
-            StatusCode::BAD_REQUEST,
-            format!("Failed to decode client data: {}", e),
-        )
-    })?;
+    let decoded_client_data =
+        base64url_decode(&auth_data.response.client_data_json).map_err(|e| {
+            (
+                StatusCode::BAD_REQUEST,
+                format!("Failed to decode client data: {}", e),
+            )
+        })?;
 
     let client_data_str = String::from_utf8(decoded_client_data).map_err(|e| {
         (
@@ -348,18 +364,20 @@ async fn verify_authentication(
     })?;
 
     // Verify the origin
-    let origin = client_data["origin"]
-        .as_str()
-        .ok_or((StatusCode::BAD_REQUEST, "Missing origin in client data".to_string()))?;
+    let origin = client_data["origin"].as_str().ok_or((
+        StatusCode::BAD_REQUEST,
+        "Missing origin in client data".to_string(),
+    ))?;
 
-    if origin != "http://localhost:3000" {
+    if origin != state.config.origin {
         return Err((StatusCode::BAD_REQUEST, "Invalid origin".to_string()));
     }
 
     // Verify the type is webauthn.get
-    let type_ = client_data["type"]
-        .as_str()
-        .ok_or((StatusCode::BAD_REQUEST, "Missing type in client data".to_string()))?;
+    let type_ = client_data["type"].as_str().ok_or((
+        StatusCode::BAD_REQUEST,
+        "Missing type in client data".to_string(),
+    ))?;
 
     if type_ != "webauthn.get" {
         return Err((StatusCode::BAD_REQUEST, "Invalid type".to_string()));
@@ -370,37 +388,52 @@ async fn verify_authentication(
 
 #[tokio::main]
 async fn main() {
+    dotenv().ok();
+
+    // Get configuration from environment variables
+    let origin = env::var("ORIGIN").expect("ORIGIN must be set");
+    let rp_id = origin
+        .strip_prefix("https://")
+        .unwrap_or(&origin)
+        .split(':')
+        .next()
+        .unwrap()
+        .to_string();
+
+    let config = AppConfig { origin, rp_id };
+
     let state = AppState {
         store: Arc::new(Mutex::new(AuthStore::default())),
         rng: Arc::new(rand::SystemRandom::new()),
+        config,
     };
 
     let app = Router::new()
-    .route("/", get(index))
-    .route("/auth", get(auth_page))
-    .route("/register/start", post(start_registration))
-    .route(
-        "/register/finish",
-        post(|state, json| async move {
-            match finish_registration(state, json).await {
-                Ok(message) => (StatusCode::OK, message.to_string()),
-                Err((status, message)) => (status, message),
-            }
-        }),
-    )
-    .route("/auth/start", post(start_authentication))
-    .route(
-        "/auth/verify",
-        post(|state, json| async move {
-            match verify_authentication(state, json).await {
-                Ok(message) => (StatusCode::OK, message.to_string()),
-                Err((status, message)) => (status, message),
-            }
-        }),
-    )
-    .with_state(state);
+        .route("/", get(index))
+        .route("/auth", get(auth_page))
+        .route("/register/start", post(start_registration))
+        .route(
+            "/register/finish",
+            post(|state, json| async move {
+                match finish_registration(state, json).await {
+                    Ok(message) => (StatusCode::OK, message.to_string()),
+                    Err((status, message)) => (status, message),
+                }
+            }),
+        )
+        .route("/auth/start", post(start_authentication))
+        .route(
+            "/auth/verify",
+            post(|state, json| async move {
+                match verify_authentication(state, json).await {
+                    Ok(message) => (StatusCode::OK, message.to_string()),
+                    Err((status, message)) => (status, message),
+                }
+            }),
+        )
+        .with_state(state);
 
-    println!("Starting server on http://localhost:3000");
-    let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await.unwrap();
+    println!("Starting server on http://localhost:3001");
+    let listener = tokio::net::TcpListener::bind("0.0.0.0:3001").await.unwrap();
     axum::serve(listener, app).await.unwrap();
 }
