@@ -18,21 +18,15 @@
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify(username)
                 });
-                
+
                 const options = await startResponse.json();
-                
+
                 // Convert base64url strings to Uint8Array
                 options.challenge = base64URLToUint8Array(options.challenge);
-                
+                options.user.id = base64URLToUint8Array(options.user.id);
+
                 const credential = await navigator.credentials.create({
-                    publicKey: {
-                        ...options,
-                        user: {
-                            id: new TextEncoder().encode(options.user_id),
-                            name: options.user_name,
-                            displayName: options.user_name
-                        }
-                    }
+                    publicKey: options
                 });
 
                 // Convert credential data for sending to server
@@ -85,7 +79,6 @@
 
 <body>
     {% block content %}{% endblock %}
-
 </body>
 
 </html>

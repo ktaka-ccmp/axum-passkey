@@ -36,31 +36,6 @@ struct AppState {
 #[template(path = "index.html")]
 struct IndexTemplate;
 
-#[derive(Serialize)]
-struct RegistrationOptions {
-    challenge: String,
-    rp_id: String,
-    user_id: String,
-    user_name: String,
-    pubkey_cred_params: Vec<PubKeyCredParam>,
-    authenticator_selection: AuthenticatorSelection,
-    timeout: u32,
-    attestation: String,
-}
-
-#[derive(Serialize)]
-struct PubKeyCredParam {
-    r#type: String,
-    alg: i32,
-}
-
-#[derive(Serialize)]
-struct AuthenticatorSelection {
-    authenticator_attachment: Option<String>,
-    resident_key: String,
-    user_verification: String,
-}
-
 #[derive(Deserialize)]
 struct RegisterCredential {
     id: String,
@@ -113,6 +88,57 @@ async fn index() -> impl IntoResponse {
     (StatusCode::OK, Html(template.render().unwrap())).into_response()
 }
 
+
+#[derive(Serialize)]
+struct UserInfo {
+    id: String,
+    name: String,
+    display_name: String,
+}
+
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RegistrationOptions {
+    challenge: String,
+    rp_id: String,
+    rp: RelyingParty,
+    user: PublicKeyCredentialUserEntity,
+    pub_key_cred_params: Vec<PubKeyCredParam>,
+    authenticator_selection: AuthenticatorSelection,
+    timeout: u32,
+    attestation: String,
+}
+
+#[derive(Serialize)]
+struct RelyingParty {
+    name: String,
+    id: String,
+}
+
+#[derive(Serialize)]
+struct PublicKeyCredentialUserEntity {
+    id: String,
+    name: String,
+    #[serde(rename = "displayName")]
+    display_name: String,
+}
+
+#[derive(Serialize)]
+struct PubKeyCredParam {
+    #[serde(rename = "type")]
+    type_: String,
+    alg: i32,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AuthenticatorSelection {
+    authenticator_attachment: Option<String>,
+    resident_key: String,
+    user_verification: String,
+}
+
 async fn start_registration(
     State(state): State<AppState>,
     Json(username): Json<String>,
@@ -127,10 +153,17 @@ async fn start_registration(
     Json(RegistrationOptions {
         challenge: URL_SAFE.encode(&challenge),
         rp_id: "localhost".to_string(),
-        user_id: Uuid::new_v4().to_string(),
-        user_name: username,
-        pubkey_cred_params: vec![PubKeyCredParam {
-            r#type: "public-key".to_string(),
+        rp: RelyingParty {
+            name: "Passkey Demo".to_string(),
+            id: "localhost".to_string(),
+        },
+        user: PublicKeyCredentialUserEntity {
+            id: Uuid::new_v4().to_string(),
+            name: username.clone(),
+            display_name: username,
+        },
+        pub_key_cred_params: vec![PubKeyCredParam {
+            type_: "public-key".to_string(),
             alg: -7, // ES256
         }],
         authenticator_selection: AuthenticatorSelection {
