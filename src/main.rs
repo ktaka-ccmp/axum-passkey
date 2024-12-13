@@ -1,12 +1,10 @@
 use askama::Template;
+use askama_axum::IntoResponse;
 use axum::{
-    extract::State,
-    response::Html,
-    routing::{get, post},
-    Json, Router,
+    extract::State, http::StatusCode, response::Html, routing::{get, post}, Json, Router
 };
 use base64::engine::{general_purpose::URL_SAFE, Engine};
-use ring::{rand, signature};
+use ring::{rand::{self, SecureRandom}, signature};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
@@ -109,9 +107,10 @@ struct AuthenticatorAssertionResponse {
     signature: String,
 }
 
-async fn index() -> Html<String> {
+async fn index() -> impl IntoResponse {
     let template = IndexTemplate {};
-    Html(template.render().unwrap())
+    // Html(template.render().unwrap())
+    (StatusCode::OK, Html(template.render().unwrap())).into_response()
 }
 
 async fn start_registration(
