@@ -1,0 +1,57 @@
+// templates/auth.html
+{% extends "base.html" %}
+
+{% block content %}
+<h1>Passkey Authentication</h1>
+<div>
+    <button onclick="startAuthentication()">Authenticate with Passkey</button>
+</div>
+
+<script>
+async function startAuthentication() {
+    try {
+        const startResponse = await fetch('/auth/start', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' }
+        });
+        
+        const options = await startResponse.json();
+        
+        // Convert base64url strings
+        options.challenge = base64URLToUint8Array(options.challenge);
+        options.allowCredentials = options.allowCredentials.map(credential => ({
+            ...credential,
+            id: base64URLToUint8Array(credential.id)
+        }));
+        
+        const credential = await navigator.credentials.get({
+            publicKey: options
+        });
+
+        // Convert credential for sending to server
+        const authResponse = {
+            id: credential.id,
+            raw_id: arrayBufferToBase64URL(credential.rawId),
+            type: credential.type,
+            response: {
+                authenticator_data: arrayBufferToBase64URL(credential.response.authenticatorData),
+                client_data_json: arrayBufferToBase64URL(credential.response.clientDataJSON),
+                signature: arrayBufferToBase64URL(credential.response.signature)
+            }
+        };
+
+        const verifyResponse = await fetch('/auth/verify', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(authResponse)
+        });
+
+        const result = await verifyResponse.text();
+        alert(result);
+    } catch (error) {
+        console.error('Error during authentication:', error);
+        alert('Authentication failed: ' + error.message);
+    }
+}
+</script>
+{% endblock %}

@@ -58,21 +58,6 @@ struct AuthenticatorAttestationResponse {
     attestation_object: String,
 }
 
-#[derive(Serialize)]
-struct AuthenticationOptions {
-    challenge: String,
-    timeout: u32,
-    rp_id: String,
-    allow_credentials: Vec<AllowCredential>,
-    user_verification: String,
-}
-
-#[derive(Serialize)]
-struct AllowCredential {
-    r#type: String,
-    id: String,
-}
-
 #[derive(Deserialize)]
 struct AuthenticateCredential {
     id: String,
@@ -280,6 +265,32 @@ async fn finish_registration(
     Ok("Registration successful")
 }
 
+#[derive(Template)]
+#[template(path = "auth.html")]
+struct AuthTemplate;
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AuthenticationOptions {
+    challenge: String,
+    timeout: u32,
+    rp_id: String,
+    allow_credentials: Vec<AllowCredential>,
+    user_verification: String,
+}
+
+#[derive(Serialize)]
+struct AllowCredential {
+    #[serde(rename = "type")]
+    type_: String,
+    id: String,
+}
+
+async fn auth_page() -> impl IntoResponse {
+    let template = AuthTemplate {};
+    (StatusCode::OK, Html(template.render().unwrap())).into_response()
+}
+
 async fn start_authentication(State(state): State<AppState>) -> Json<AuthenticationOptions> {
     let mut challenge = vec![0u8; 32];
     state.rng.fill(&mut challenge).unwrap();
@@ -289,7 +300,7 @@ async fn start_authentication(State(state): State<AppState>) -> Json<Authenticat
         .credentials
         .iter()
         .map(|(id, _)| AllowCredential {
-            r#type: "public-key".to_string(),
+            type_: "public-key".to_string(),
             id: id.clone(),
         })
         .collect();
@@ -306,28 +317,55 @@ async fn start_authentication(State(state): State<AppState>) -> Json<Authenticat
 async fn verify_authentication(
     State(state): State<AppState>,
     Json(auth_data): Json<AuthenticateCredential>,
-) -> &'static str {
+) -> Result<&'static str, (StatusCode, String)> {
     let store = state.store.lock().await;
 
-    let credential = store
-        .credentials
-        .get(&auth_data.id)
-        .expect("Unknown credential");
+    let credential = store.credentials.get(&auth_data.id).ok_or((
+        StatusCode::BAD_REQUEST,
+        "Unknown credential".to_string(),
+    ))?;
 
-    // Verify the signature
-    let client_data: serde_json::Value = serde_json::from_str(&auth_data.response.client_data_json)
-        .expect("Invalid client data JSON");
+    // Decode and verify client data
+    let decoded_client_data = base64url_decode(&auth_data.response.client_data_json).map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            format!("Failed to decode client data: {}", e),
+        )
+    })?;
 
-    // In production:
-    // 1. Verify challenge matches stored challenge
-    // 2. Verify origin
-    // 3. Verify rpId
-    // 4. Verify type is "webauthn.get"
-    // 5. Verify authenticator data format
-    // 6. Verify signature using stored public key
-    // 7. Verify counter increased
+    let client_data_str = String::from_utf8(decoded_client_data).map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            format!("Client data is not valid UTF-8: {}", e),
+        )
+    })?;
 
-    "Authentication successful"
+    let client_data: serde_json::Value = serde_json::from_str(&client_data_str).map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            format!("Invalid client data JSON: {}", e),
+        )
+    })?;
+
+    // Verify the origin
+    let origin = client_data["origin"]
+        .as_str()
+        .ok_or((StatusCode::BAD_REQUEST, "Missing origin in client data".to_string()))?;
+
+    if origin != "http://localhost:3000" {
+        return Err((StatusCode::BAD_REQUEST, "Invalid origin".to_string()));
+    }
+
+    // Verify the type is webauthn.get
+    let type_ = client_data["type"]
+        .as_str()
+        .ok_or((StatusCode::BAD_REQUEST, "Missing type in client data".to_string()))?;
+
+    if type_ != "webauthn.get" {
+        return Err((StatusCode::BAD_REQUEST, "Invalid type".to_string()));
+    }
+
+    Ok("Authentication successful")
 }
 
 #[tokio::main]
@@ -339,6 +377,7 @@ async fn main() {
 
     let app = Router::new()
     .route("/", get(index))
+    .route("/auth", get(auth_page))
     .route("/register/start", post(start_registration))
     .route(
         "/register/finish",
@@ -350,7 +389,15 @@ async fn main() {
         }),
     )
     .route("/auth/start", post(start_authentication))
-    .route("/auth/verify", post(verify_authentication))
+    .route(
+        "/auth/verify",
+        post(|state, json| async move {
+            match verify_authentication(state, json).await {
+                Ok(message) => (StatusCode::OK, message.to_string()),
+                Err((status, message)) => (status, message),
+            }
+        }),
+    )
     .with_state(state);
 
     println!("Starting server on http://localhost:3000");
