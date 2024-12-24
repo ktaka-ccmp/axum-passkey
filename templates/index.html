@@ -63,7 +63,7 @@ async function checkAndAuthenticate() {
         console.log('Auth result:', error.name);
         authStatus.style.display = 'none';
         authActions.style.display = 'block';
-        
+
         if (error.name === 'NotAllowedError' || error.message === 'Authentication failed') {
             // Show both options if auth was cancelled or failed
             authActions.innerHTML = `
