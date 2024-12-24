@@ -1,13 +1,135 @@
 {% extends "base.html" %}
 
 {% block content %}
-<h1>Passkey Registration</h1>
-<div>
-    <label for="username">Username:</label>
-    <input type="text" id="username" name="username">
-    <button onclick="startRegistration()">Register with Passkey</button>
+<div id="auth-header" style="padding: 10px; border-bottom: 1px solid #eee; margin-bottom: 20px;">
+    <div id="auth-status" style="display: none;">
+        <!-- Will show greeting when authenticated -->
+    </div>
+    <div id="auth-actions" style="display: none;">
+        <!-- Will show auth buttons based on state -->
+    </div>
 </div>
-<div style="margin-top: 20px;">
-    <p>Already registered? <a href="/auth">Go to authentication</a></p>
+
+<div id="main-content">
+    <h1>Hello, World!</h1>
+    <p>Welcome to our site. This is the main content that's always visible.</p>
 </div>
+
+<script>
+async function checkAndAuthenticate() {
+    const authStatus = document.getElementById('auth-status');
+    const authActions = document.getElementById('auth-actions');
+
+    try {
+        console.log('Starting passkey check and authentication');
+        const credential = await navigator.credentials.get({
+            publicKey: {
+                challenge: crypto.getRandomValues(new Uint8Array(32)),
+                rpId: location.hostname,
+                timeout: 30000,
+                allowCredentials: []
+            }
+        });
+
+        if (credential) {
+            console.log('Passkey found, attempting authentication');
+            const authResponse = {
+                id: credential.id,
+                raw_id: arrayBufferToBase64URL(credential.rawId),
+                type: credential.type,
+                response: {
+                    authenticator_data: arrayBufferToBase64URL(credential.response.authenticatorData),
+                    client_data_json: arrayBufferToBase64URL(credential.response.clientDataJSON),
+                    signature: arrayBufferToBase64URL(credential.response.signature)
+                }
+            };
+
+            const verifyResponse = await fetch('/auth/verify', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(authResponse)
+            });
+
+            if (verifyResponse.ok) {
+                // Show authenticated state
+                authStatus.textContent = "Welcome back!";
+                authStatus.style.display = 'block';
+                authActions.style.display = 'none';
+            } else {
+                throw new Error('Authentication failed');
+            }
+        }
+    } catch (error) {
+        console.log('Auth result:', error.name);
+        authStatus.style.display = 'none';
+        authActions.style.display = 'block';
+        
+        if (error.name === 'NotAllowedError' || error.message === 'Authentication failed') {
+            // Show both options if auth was cancelled or failed
+            authActions.innerHTML = `
+                <button onclick="startAuthentication()" class="auth-button">Sign in with Passkey</button>
+                <button onclick="showRegistrationModal()" class="auth-button">Register New Passkey</button>
+            `;
+        } else {
+            // No passkeys found - only show registration
+            authActions.innerHTML = `
+                <button onclick="showRegistrationModal()" class="auth-button">Register with Passkey</button>
+            `;
+        }
+    }
+}
+
+function showRegistrationModal() {
+    const modal = document.createElement('div');
+    modal.innerHTML = `
+        <div style="position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.5); display: flex; align-items: center; justify-content: center;">
+            <div style="background: white; padding: 20px; border-radius: 8px; max-width: 400px;">
+                <h2>Register</h2>
+                <div style="margin: 20px 0;">
+                    <label for="username">Username:</label>
+                    <input type="text" id="username" style="margin-left: 10px;">
+                </div>
+                <div style="text-align: right;">
+                    <button onclick="this.parentElement.parentElement.parentElement.remove()" style="margin-right: 10px;">Cancel</button>
+                    <button onclick="startRegistration()">Register</button>
+                </div>
+            </div>
+        </div>
+    `;
+    document.body.appendChild(modal);
+}
+
+// Start the process when page loads
+document.addEventListener('DOMContentLoaded', checkAndAuthenticate);
+</script>
+
+<style>
+#auth-header {
+    display: flex;
+    justify-content: flex-end;
+    align-items: center;
+}
+
+#auth-status {
+    font-weight: 500;
+    color: #2e7d32;
+}
+
+.auth-button {
+    padding: 8px 16px;
+    border-radius: 4px;
+    border: 1px solid #ddd;
+    background-color: #f8f9fa;
+    cursor: pointer;
+    margin-left: 10px;
+}
+
+.auth-button:hover {
+    background-color: #e9ecef;
+}
+
+#main-content {
+    padding: 20px;
+}
+</style>
 {% endblock %}
