@@ -22,6 +22,8 @@ async function checkAndAuthenticate() {
 
     try {
         console.log('Starting passkey check and authentication');
+        console.log('RP ID:', location.hostname);
+
         const credential = await navigator.credentials.get({
             publicKey: {
                 challenge: crypto.getRandomValues(new Uint8Array(32)),
@@ -30,6 +32,8 @@ async function checkAndAuthenticate() {
                 allowCredentials: []
             }
         });
+
+        console.log('Passkey check result:', credential);
 
         if (credential) {
             console.log('Passkey found, attempting authentication');

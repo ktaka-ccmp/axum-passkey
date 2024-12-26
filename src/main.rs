@@ -29,7 +29,7 @@ struct AuthStore {
     credentials: HashMap<String, StoredCredential>,
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize, Debug)]
 struct StoredCredential {
     credential_id: Vec<u8>,
     public_key: Vec<u8>,
@@ -69,7 +69,7 @@ struct AuthenticatorAttestationResponse {
     attestation_object: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Debug)]
 struct AuthenticateCredential {
     id: String,
     raw_id: String,
@@ -78,7 +78,7 @@ struct AuthenticateCredential {
     type_: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Debug)]
 struct AuthenticatorAssertionResponse {
     authenticator_data: String,
     client_data_json: String,
@@ -329,18 +329,17 @@ async fn start_authentication(State(state): State<AppState>) -> Json<Authenticat
     })
 }
 
+use ring::{digest, signature::UnparsedPublicKey, signature::VerificationAlgorithm};
+
 async fn verify_authentication(
     State(state): State<AppState>,
     Json(auth_data): Json<AuthenticateCredential>,
 ) -> Result<&'static str, (StatusCode, String)> {
     let store = state.store.lock().await;
 
-    let credential = store
-        .credentials
-        .get(&auth_data.id)
-        .ok_or((StatusCode::BAD_REQUEST, "Unknown credential".to_string()))?;
+    println!("Authenticating user: {:?}", auth_data);
 
-    // Decode and verify client data
+    // Decode client data JSON
     let decoded_client_data =
         base64url_decode(&auth_data.response.client_data_json).map_err(|e| {
             (
@@ -349,7 +348,7 @@ async fn verify_authentication(
             )
         })?;
 
-    let client_data_str = String::from_utf8(decoded_client_data).map_err(|e| {
+    let client_data_str = String::from_utf8(decoded_client_data.clone()).map_err(|e| {
         (
             StatusCode::BAD_REQUEST,
             format!("Client data is not valid UTF-8: {}", e),
@@ -363,7 +362,9 @@ async fn verify_authentication(
         )
     })?;
 
-    // Verify the origin
+    println!("Decoded client data: {}", client_data);
+
+    // Verify origin
     let origin = client_data["origin"].as_str().ok_or((
         StatusCode::BAD_REQUEST,
         "Missing origin in client data".to_string(),
@@ -373,7 +374,7 @@ async fn verify_authentication(
         return Err((StatusCode::BAD_REQUEST, "Invalid origin".to_string()));
     }
 
-    // Verify the type is webauthn.get
+    // Verify type
     let type_ = client_data["type"].as_str().ok_or((
         StatusCode::BAD_REQUEST,
         "Missing type in client data".to_string(),
@@ -382,6 +383,65 @@ async fn verify_authentication(
     if type_ != "webauthn.get" {
         return Err((StatusCode::BAD_REQUEST, "Invalid type".to_string()));
     }
+
+    // Decode authenticator data
+    let auth_data_bytes =
+        base64url_decode(&auth_data.response.authenticator_data).map_err(|e| {
+            (
+                StatusCode::BAD_REQUEST,
+                format!("Failed to decode authenticator data: {}", e),
+            )
+        })?;
+
+    // Verify RP ID hash (first 32 bytes of authenticator data)
+    let rp_id_hash = digest::digest(&digest::SHA256, state.config.rp_id.as_bytes());
+    if auth_data_bytes[..32] != rp_id_hash.as_ref()[..] {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Invalid RP ID hash in authenticator data".to_string(),
+        ));
+    }
+
+    // Check user presence flag (bit 0 of flags byte)
+    let flags = auth_data_bytes[32];
+    if flags & 0x01 != 0x01 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "User presence flag not set".to_string(),
+        ));
+    }
+
+    // Compute client data hash
+    let client_data_hash = digest::digest(&digest::SHA256, &decoded_client_data);
+
+    // Verify signature
+    // The signature is over the concatenation of authenticator data and client data hash
+    let mut signed_data = Vec::new();
+    signed_data.extend_from_slice(&auth_data_bytes);
+    signed_data.extend_from_slice(client_data_hash.as_ref());
+
+    // Decode signature
+    let signature = base64url_decode(&auth_data.response.signature).map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            format!("Failed to decode signature: {}", e),
+        )
+    })?;
+
+    // Verify using stored public key (assuming ES256)
+
+    // Get stored credential
+    let credential = store
+        .credentials
+        .get(&auth_data.id)
+        .ok_or((StatusCode::BAD_REQUEST, "Unknown credential".to_string()))?;
+
+    let verification_algorithm = &ring::signature::ECDSA_P256_SHA256_ASN1;
+    let public_key = UnparsedPublicKey::new(verification_algorithm, &credential.public_key);
+
+    public_key
+        .verify(&signed_data, &signature)
+        .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid signature".to_string()))?;
 
     Ok("Authentication successful")
 }
