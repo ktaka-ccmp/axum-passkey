@@ -27,6 +27,9 @@
 
         // Authentication functions
         async function startAuthentication() {
+            const authStatus = document.getElementById("auth-status");
+            const authActions = document.getElementById("auth-actions");
+
             try {
                 const startResponse = await fetch('/auth/start', {
                     method: 'POST',
@@ -65,7 +68,9 @@
                 });
 
                 if (verifyResponse.ok) {
-                    location.reload(); // Refresh to show authenticated state
+                    authStatus.textContent = "Welcome back!";
+                    authStatus.style.display = "block";
+                    authActions.style.display = "none";
                 } else {
                     throw new Error('Server verification failed');
                 }

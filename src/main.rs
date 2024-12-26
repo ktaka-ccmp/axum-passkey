@@ -186,6 +186,8 @@ fn base64url_decode(input: &str) -> Result<Vec<u8>, base64::DecodeError> {
     URL_SAFE.decode(padded)
 }
 
+use ciborium::value::{Integer, Value as CborValue};
+
 async fn finish_registration(
     State(state): State<AppState>,
     Json(reg_data): Json<RegisterCredential>,
@@ -261,6 +263,160 @@ async fn finish_registration(
             )
         })?;
 
+    // Parse the attestation object as CBOR
+    let attestation_cbor: CborValue = ciborium::de::from_reader(&attestation_object[..])
+        .map_err(|e| (StatusCode::BAD_REQUEST, format!("Invalid CBOR data: {}", e)))?;
+
+    // Extract the authData from the attestation
+    let auth_data = if let CborValue::Map(map) = attestation_cbor {
+        let mut auth_data = None;
+
+        for (key, value) in map {
+            if let CborValue::Text(key_str) = key {
+                if key_str == "authData" {
+                    if let CborValue::Bytes(data) = value {
+                        auth_data = Some(data);
+                        break;
+                    }
+                }
+            }
+        }
+
+        auth_data.ok_or((
+            StatusCode::BAD_REQUEST,
+            "Missing or invalid authData".to_string(),
+        ))?
+    } else {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Invalid attestation format".to_string(),
+        ));
+    };
+
+    // After getting auth_data, let's debug print more details
+    println!("Auth data length: {}", auth_data.len());
+    println!("Auth data (hex): {:02x?}", auth_data);
+
+    // The public key is in COSE format in the credential data portion of authData
+    // First 37 bytes:
+    // - RP ID hash (32 bytes)
+    // - flags (1 byte)
+    // - counter (4 bytes)
+    let mut pos = 37;
+
+    // Check if attested credential data present
+    let flags = auth_data[32];
+    let has_attested_cred_data = (flags & 0x40) != 0;
+
+    if !has_attested_cred_data {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "No attested credential data present".to_string(),
+        ));
+    }
+
+    println!("Flags: {:08b}", flags);
+
+    if auth_data.len() < pos + 18 {
+        // 16-byte AAGUID + 2-byte credential ID length
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Authenticator data too short".to_string(),
+        ));
+    }
+
+    // Skip AAGUID
+    pos += 16;
+
+    // Get credential ID length (16-bit big-endian)
+    let cred_id_len = ((auth_data[pos] as usize) << 8) | (auth_data[pos + 1] as usize);
+    println!(
+        "Reading cred_id_len at pos {} and {}: {:02x} {:02x}",
+        pos,
+        pos + 1,
+        auth_data[pos],
+        auth_data[pos + 1]
+    );
+    println!("Credential ID length: {}", cred_id_len);
+
+    pos += 2;
+
+    if cred_id_len == 0 || cred_id_len > 1024 {
+        // Sanity check
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Invalid credential ID length".to_string(),
+        ));
+    }
+
+    println!("Credential ID length: {}", cred_id_len);
+    println!("Current position: {}", pos);
+    println!("Remaining data length: {}", auth_data.len() - pos);
+
+    if auth_data.len() < pos + cred_id_len {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Authenticator data too short for credential ID".to_string(),
+        ));
+    }
+
+    // Skip credential ID
+    pos += cred_id_len;
+
+    println!("Position after credential ID: {}", pos);
+    println!("Remaining data length: {}", auth_data.len() - pos);
+
+    // The remaining data is the CBOR-encoded public key
+    let public_key_cbor: CborValue = ciborium::de::from_reader(&auth_data[pos..]).map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            format!("Invalid public key CBOR: {}", e),
+        )
+    })?;
+
+    // Extract the x and y coordinates from the COSE key
+    let (x_coord, y_coord) = if let CborValue::Map(map) = public_key_cbor {
+        let mut x_coord = None;
+        let mut y_coord = None;
+
+        for (key, value) in map {
+            if let CborValue::Integer(i) = key {
+                if i == Integer::from(-2) {
+                    if let CborValue::Bytes(x) = value {
+                        x_coord = Some(x);
+                    }
+                } else if i == Integer::from(-3) {
+                    if let CborValue::Bytes(y) = value {
+                        y_coord = Some(y);
+                    }
+                }
+            }
+        }
+
+        match (x_coord, y_coord) {
+            (Some(x), Some(y)) => (x, y),
+            _ => {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    "Missing or invalid key coordinates".to_string(),
+                ))
+            }
+        }
+    } else {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Invalid public key format".to_string(),
+        ));
+    };
+
+    // Construct the uncompressed EC public key format (0x04 || x || y)
+    let mut public_key = Vec::with_capacity(65);
+    public_key.push(0x04); // Uncompressed point format
+    public_key.extend_from_slice(&x_coord);
+    public_key.extend_from_slice(&y_coord);
+
+    println!("Extracted public key: {:?}", public_key);
+
     // Decode credential ID
     let credential_id = base64url_decode(&reg_data.raw_id).map_err(|e| {
         (
@@ -272,7 +428,7 @@ async fn finish_registration(
     // Store the credential
     let credential = StoredCredential {
         credential_id,
-        public_key: vec![], // Extract from attestation_object
+        public_key,
         counter: 0,
     };
 
@@ -280,11 +436,7 @@ async fn finish_registration(
     Ok("Registration successful")
 }
 
-#[derive(Template)]
-#[template(path = "auth.html")]
-struct AuthTemplate;
-
-#[derive(Serialize)]
+#[derive(Serialize, Debug)]
 #[serde(rename_all = "camelCase")]
 struct AuthenticationOptions {
     challenge: String,
@@ -294,16 +446,11 @@ struct AuthenticationOptions {
     user_verification: String,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Debug)]
 struct AllowCredential {
     #[serde(rename = "type")]
     type_: String,
     id: String,
-}
-
-async fn auth_page() -> impl IntoResponse {
-    let template = AuthTemplate {};
-    (StatusCode::OK, Html(template.render().unwrap())).into_response()
 }
 
 async fn start_authentication(State(state): State<AppState>) -> Json<AuthenticationOptions> {
@@ -320,13 +467,17 @@ async fn start_authentication(State(state): State<AppState>) -> Json<Authenticat
         })
         .collect();
 
-    Json(AuthenticationOptions {
+    let options = AuthenticationOptions {
         challenge: URL_SAFE.encode(&challenge),
         timeout: 60000,
         rp_id: state.config.rp_id.clone(),
         allow_credentials,
         user_verification: "preferred".to_string(),
-    })
+    };
+
+    println!("Starting authentication: {:?}", options);
+
+    Json(options)
 }
 
 use ring::{digest, signature::UnparsedPublicKey, signature::VerificationAlgorithm};
@@ -470,7 +621,6 @@ async fn main() {
 
     let app = Router::new()
         .route("/", get(index))
-        .route("/auth", get(auth_page))
         .route("/register/start", post(start_registration))
         .route(
             "/register/finish",

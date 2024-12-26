@@ -1,11 +1,12 @@
-{% extends "base.html" %}
-
-{% block content %}
-<div id="auth-header" style="padding: 10px; border-bottom: 1px solid #eee; margin-bottom: 20px;">
-    <div id="auth-status" style="display: none;">
+{% extends "base.html" %} {% block content %}
+<div
+    id="auth-header"
+    style="padding: 10px; border-bottom: 1px solid #eee; margin-bottom: 20px"
+>
+    <div id="auth-status" style="display: none">
         <!-- Will show greeting when authenticated -->
     </div>
-    <div id="auth-actions" style="display: none;">
+    <div id="auth-actions" style="display: none">
         <!-- Will show auth buttons based on state -->
     </div>
 </div>
@@ -16,76 +17,49 @@
 </div>
 
 <script>
-async function checkAndAuthenticate() {
-    const authStatus = document.getElementById('auth-status');
-    const authActions = document.getElementById('auth-actions');
+    async function checkAuthOptions() {
+        const authStatus = document.getElementById("auth-status");
+        const authActions = document.getElementById("auth-actions");
 
-    try {
-        console.log('Starting passkey check and authentication');
-        console.log('RP ID:', location.hostname);
-
-        const credential = await navigator.credentials.get({
-            publicKey: {
-                challenge: crypto.getRandomValues(new Uint8Array(32)),
-                rpId: location.hostname,
-                timeout: 30000,
-                allowCredentials: []
-            }
-        });
-
-        console.log('Passkey check result:', credential);
-
-        if (credential) {
-            console.log('Passkey found, attempting authentication');
-            const authResponse = {
-                id: credential.id,
-                raw_id: arrayBufferToBase64URL(credential.rawId),
-                type: credential.type,
-                response: {
-                    authenticator_data: arrayBufferToBase64URL(credential.response.authenticatorData),
-                    client_data_json: arrayBufferToBase64URL(credential.response.clientDataJSON),
-                    signature: arrayBufferToBase64URL(credential.response.signature)
-                }
-            };
-
-            const verifyResponse = await fetch('/auth/verify', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(authResponse)
+        try {
+            const startResponse = await fetch("/auth/start", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
             });
 
-            if (verifyResponse.ok) {
-                // Show authenticated state
-                authStatus.textContent = "Welcome back!";
-                authStatus.style.display = 'block';
-                authActions.style.display = 'none';
-            } else {
-                throw new Error('Authentication failed');
-            }
-        }
-    } catch (error) {
-        console.log('Auth result:', error.name);
-        authStatus.style.display = 'none';
-        authActions.style.display = 'block';
+            const options = await startResponse.json();
+            console.log("Authentication options:", options);
 
-        if (error.name === 'NotAllowedError' || error.message === 'Authentication failed') {
-            // Show both options if auth was cancelled or failed
-            authActions.innerHTML = `
-                <button onclick="startAuthentication()" class="auth-button">Sign in with Passkey</button>
+            // Convert base64url strings
+            options.challenge = base64URLToUint8Array(options.challenge);
+            options.allowCredentials = options.allowCredentials.map(
+                (credential) => ({
+                    ...credential,
+                    id: base64URLToUint8Array(credential.id),
+                })
+            );
+
+            // Check if authentication options are available
+            if (options.challenge && options.allowCredentials.length > 0) {
+                authActions.style.display = "block";
+                authActions.innerHTML = `
+               <button onclick="startAuthentication()" class="auth-button">Sign in with Passkey</button>
+           `;
+            } else {
+                authActions.style.display = "block";
+                authActions.innerHTML = `
                 <button onclick="showRegistrationModal()" class="auth-button">Register New Passkey</button>
             `;
-        } else {
-            // No passkeys found - only show registration
-            authActions.innerHTML = `
-                <button onclick="showRegistrationModal()" class="auth-button">Register with Passkey</button>
-            `;
+            }
+        } catch (error) {
+            console.error("Error during authentication:", error);
+            authActions.style.display = "block";
         }
     }
-}
 
-function showRegistrationModal() {
-    const modal = document.createElement('div');
-    modal.innerHTML = `
+    function showRegistrationModal() {
+        const modal = document.createElement("div");
+        modal.innerHTML = `
         <div style="position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.5); display: flex; align-items: center; justify-content: center;">
             <div style="background: white; padding: 20px; border-radius: 8px; max-width: 400px;">
                 <h2>Register</h2>
@@ -100,11 +74,11 @@ function showRegistrationModal() {
             </div>
         </div>
     `;
-    document.body.appendChild(modal);
-}
+        document.body.appendChild(modal);
+    }
 
-// Start the process when page loads
-document.addEventListener('DOMContentLoaded', checkAndAuthenticate);
+    // Start the process when page loads
+    document.addEventListener('DOMContentLoaded', checkAuthOptions);
 </script>
 
 {% endblock %}
