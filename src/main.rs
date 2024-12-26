@@ -22,6 +22,7 @@ use uuid::Uuid;
 use ciborium::value::{Integer, Value as CborValue};
 use dotenv::dotenv;
 use std::env;
+use webpki::EndEntityCert;
 
 #[derive(Clone, Serialize, Deserialize, Debug)]
 struct StoredChallenge {
@@ -229,18 +230,77 @@ fn verify_packed_attestation(
     client_data_hash: &[u8],
     att_stmt: &Vec<(CborValue, CborValue)>,
 ) -> Result<(), String> {
+    // 1) Get the alg and sig from the existing helper
     let (alg, sig) = get_sig_from_stmt(att_stmt)?;
 
-    let mut verify_data = Vec::new();
-    verify_data.extend_from_slice(auth_data);
-    verify_data.extend_from_slice(client_data_hash);
+    // 2) Build the data that was signed
+    let mut signed_data = Vec::with_capacity(auth_data.len() + client_data_hash.len());
+    signed_data.extend_from_slice(auth_data);
+    signed_data.extend_from_slice(client_data_hash);
 
-    match alg {
-        -7 => {
-            let verification_algorithm = &ring::signature::ECDSA_P256_SHA256_ASN1;
-        }
-        _ => return Err("Unsupported algorithm".to_string()),
+    // 3) Make sure it's an ECDSA P-256 / SHA256 attestation
+    //    (Add checks if you want multiple algorithms.)
+    if alg != -7 {
+        return Err(format!("Unsupported or unrecognized algorithm: {}", alg));
     }
+
+    // 4) Extract x5c from the raw attStmt array,
+    //    instead of building a HashMap (which requires Eq/Hash on Value).
+    let mut x5c_opt: Option<Vec<u8>> = None;
+    for (k, v) in att_stmt {
+        if let (CborValue::Text(key_str), CborValue::Array(certs)) = (k, v) {
+            if key_str == "x5c" {
+                // We expect x5c to be an array of certs.
+                // The first array entry is the leaf certificate (DER).
+                if let Some(CborValue::Bytes(cert_bytes)) = certs.first() {
+                    x5c_opt = Some(cert_bytes.clone());
+                }
+                break;
+            }
+        }
+    }
+
+    // 5) If there's no x5c, we might be dealing with self-attestation or "none".
+    //    Real "packed" attestation typically includes x5c.
+    let x5c_bytes =
+        x5c_opt.ok_or_else(|| "No x5c array found in attStmt for 'packed'".to_string())?;
+
+    // 6) Parse the certificate using webpki
+    let cert = EndEntityCert::try_from(x5c_bytes.as_ref())
+        .map_err(|e| format!("Failed to parse x5c certificate: {:?}", e))?;
+
+    // 7) Actually verify the signature against the certificate's public key
+    //    Use `verify_signature` with your supported sig algs array.
+    cert.verify_signature(&webpki::ECDSA_P256_SHA256, &signed_data, &sig)
+        .map_err(|_| "Attestation signature invalid".to_string())?;
+
+    // (Optional) Also verify the cert chain, check trust anchors, etc.
+    // (Optional) You may also want to verify that the certificate
+    //     has a valid trust chain, i.e., anchored to a known root CA.
+    //     That requires additional logic with `webpki::TLSServerTrustAnchors`, etc.
+
+    // let trust_anchors = webpki::TLSServerTrustAnchors(&[/* your root CA(s) here */]);
+    // let now = webpki::Time::from_seconds_since_unix_epoch(
+    //     std::time::SystemTime::now()
+    //         .duration_since(std::time::UNIX_EPOCH)
+    //         .unwrap()
+    //         .as_secs(),
+    // );
+
+    // // Suppose the entire chain is in x5c. The first is the leaf, the rest are intermediates.
+    // let (leaf_bytes, intermediates) = /* ...split the array of certs... */;
+
+    // let end_entity = webpki::EndEntityCert::try_from(leaf_bytes)?;
+    // let chain: Vec<&[u8]> = intermediates.iter().map(|cborval| extract_bytes(cborval)).collect();
+
+    // end_entity.verify_is_valid_tls_server_cert(
+    //     &webpki::ALL_SHA256, // or whichever alg you want
+    //     &trust_anchors,
+    //     &chain,
+    //     now
+    // )?;
+
+    println!("Packed attestation signature verified with x5c certificate!");
 
     Ok(())
 }
@@ -551,8 +611,8 @@ async fn start_authentication(State(state): State<AppState>) -> Json<Authenticat
 
     let allow_credentials: Vec<_> = store
         .credentials
-        .iter()
-        .map(|(id, _)| AllowCredential {
+        .keys()
+        .map(|id| AllowCredential {
             type_: "public-key".to_string(),
             id: id.clone(), // ID is already base64url encoded
         })
