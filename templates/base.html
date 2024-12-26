@@ -58,8 +58,11 @@
                         authenticator_data: arrayBufferToBase64URL(credential.response.authenticatorData),
                         client_data_json: arrayBufferToBase64URL(credential.response.clientDataJSON),
                         signature: arrayBufferToBase64URL(credential.response.signature)
-                    }
+                    },
+                    auth_id: options.authId
                 };
+
+                console.log('Authentication response:', authResponse);
 
                 const verifyResponse = await fetch('/auth/verify', {
                     method: 'POST',
@@ -112,7 +115,8 @@
                     response: {
                         attestation_object: arrayBufferToBase64URL(credential.response.attestationObject),
                         client_data_json: arrayBufferToBase64URL(credential.response.clientDataJSON)
-                    }
+                    },
+                    username: username
                 };
 
                 const finishResponse = await fetch('/register/finish', {

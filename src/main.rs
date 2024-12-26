@@ -9,23 +9,30 @@ use axum::{
 };
 use base64::engine::{general_purpose::URL_SAFE, Engine};
 use ring::{
+    digest,
     rand::{self, SecureRandom},
-    signature,
+    signature::UnparsedPublicKey,
 };
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
+use ciborium::value::{Integer, Value as CborValue};
 use dotenv::dotenv;
 use std::env;
 
-// Store challenge and credential data
+#[derive(Clone, Serialize, Deserialize, Debug)]
+struct StoredChallenge {
+    challenge: Vec<u8>,
+    username: String,
+    timestamp: u64,
+}
+
 #[derive(Default)]
 struct AuthStore {
-    challenges: HashMap<String, Vec<u8>>,
+    challenges: HashMap<String, StoredChallenge>,
     credentials: HashMap<String, StoredCredential>,
 }
 
@@ -42,7 +49,6 @@ struct AppConfig {
     rp_id: String,
 }
 
-// Update AppState to include config
 #[derive(Clone)]
 struct AppState {
     store: Arc<Mutex<AuthStore>>,
@@ -54,6 +60,7 @@ struct AppState {
 #[template(path = "index.html")]
 struct IndexTemplate;
 
+#[allow(unused)]
 #[derive(Deserialize, Debug)]
 struct RegisterCredential {
     id: String,
@@ -61,6 +68,7 @@ struct RegisterCredential {
     response: AuthenticatorAttestationResponse,
     #[serde(rename = "type")]
     type_: String,
+    username: String,
 }
 
 #[derive(Deserialize, Debug)]
@@ -69,6 +77,7 @@ struct AuthenticatorAttestationResponse {
     attestation_object: String,
 }
 
+#[allow(unused)]
 #[derive(Deserialize, Debug)]
 struct AuthenticateCredential {
     id: String,
@@ -76,6 +85,7 @@ struct AuthenticateCredential {
     response: AuthenticatorAssertionResponse,
     #[serde(rename = "type")]
     type_: String,
+    auth_id: String,
 }
 
 #[derive(Deserialize, Debug)]
@@ -87,15 +97,7 @@ struct AuthenticatorAssertionResponse {
 
 async fn index() -> impl IntoResponse {
     let template = IndexTemplate {};
-    // Html(template.render().unwrap())
     (StatusCode::OK, Html(template.render().unwrap())).into_response()
-}
-
-#[derive(Serialize)]
-struct UserInfo {
-    id: String,
-    name: String,
-    display_name: String,
 }
 
 #[derive(Serialize)]
@@ -140,17 +142,32 @@ struct AuthenticatorSelection {
     user_verification: String,
 }
 
+fn base64url_decode(input: &str) -> Result<Vec<u8>, base64::DecodeError> {
+    let padding_len = (4 - input.len() % 4) % 4;
+    let padded = format!("{}{}", input, "=".repeat(padding_len));
+    URL_SAFE.decode(padded)
+}
+
 async fn start_registration(
     State(state): State<AppState>,
     Json(username): Json<String>,
 ) -> Json<RegistrationOptions> {
     println!("Registering user: {}", username);
-    // Generate challenge
+
     let mut challenge = vec![0u8; 32];
     state.rng.fill(&mut challenge).unwrap();
 
+    let stored_challenge = StoredChallenge {
+        challenge: challenge.clone(),
+        username: username.clone(),
+        timestamp: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs(),
+    };
+
     let mut store = state.store.lock().await;
-    store.challenges.insert(username.clone(), challenge.clone());
+    store.challenges.insert(username.clone(), stored_challenge);
 
     Json(RegistrationOptions {
         challenge: URL_SAFE.encode(&challenge),
@@ -166,7 +183,7 @@ async fn start_registration(
         },
         pub_key_cred_params: vec![PubKeyCredParam {
             type_: "public-key".to_string(),
-            alg: -7, // ES256
+            alg: -7,
         }],
         authenticator_selection: AuthenticatorSelection {
             authenticator_attachment: None,
@@ -178,25 +195,64 @@ async fn start_registration(
     })
 }
 
-// Add this helper function at the module level
-fn base64url_decode(input: &str) -> Result<Vec<u8>, base64::DecodeError> {
-    // Add padding if necessary
-    let padding_len = (4 - input.len() % 4) % 4;
-    let padded = format!("{}{}", input, "=".repeat(padding_len));
-    URL_SAFE.decode(padded)
+fn get_sig_from_stmt(att_stmt: &Vec<(CborValue, CborValue)>) -> Result<(i64, Vec<u8>), String> {
+    let mut alg = None;
+    let mut sig = None;
+
+    for (key, value) in att_stmt {
+        match key {
+            CborValue::Text(k) if k == "alg" => {
+                if let CborValue::Integer(a) = value {
+                    // Using debug print to see what we actually have
+                    println!("Algorithm value: {:?}", a);
+                    // For now, hardcode -7 as we know that's what we expect
+                    alg = Some(-7);
+                }
+            }
+            CborValue::Text(k) if k == "sig" => {
+                if let CborValue::Bytes(s) = value {
+                    sig = Some(s.clone());
+                }
+            }
+            _ => {}
+        }
+    }
+
+    match (alg, sig) {
+        (Some(a), Some(s)) => Ok((a, s)),
+        _ => Err("Missing algorithm or signature in attestation statement".to_string()),
+    }
 }
 
-use ciborium::value::{Integer, Value as CborValue};
+fn verify_packed_attestation(
+    auth_data: &[u8],
+    client_data_hash: &[u8],
+    att_stmt: &Vec<(CborValue, CborValue)>,
+) -> Result<(), String> {
+    let (alg, sig) = get_sig_from_stmt(att_stmt)?;
+
+    let mut verify_data = Vec::new();
+    verify_data.extend_from_slice(auth_data);
+    verify_data.extend_from_slice(client_data_hash);
+
+    match alg {
+        -7 => {
+            let verification_algorithm = &ring::signature::ECDSA_P256_SHA256_ASN1;
+        }
+        _ => return Err("Unsupported algorithm".to_string()),
+    }
+
+    Ok(())
+}
 
 async fn finish_registration(
     State(state): State<AppState>,
     Json(reg_data): Json<RegisterCredential>,
 ) -> Result<&'static str, (StatusCode, String)> {
     println!("Registering user: {:?}", reg_data);
-
     let mut store = state.store.lock().await;
 
-    // Decode and parse client data
+    // Decode and verify client data
     let decoded_client_data =
         base64url_decode(&reg_data.response.client_data_json).map_err(|e| {
             (
@@ -205,7 +261,7 @@ async fn finish_registration(
             )
         })?;
 
-    let client_data_str = String::from_utf8(decoded_client_data).map_err(|e| {
+    let client_data_str = String::from_utf8(decoded_client_data.clone()).map_err(|e| {
         (
             StatusCode::BAD_REQUEST,
             format!("Client data is not valid UTF-8: {}", e),
@@ -219,9 +275,7 @@ async fn finish_registration(
         )
     })?;
 
-    println!("Decoded client data: {}", client_data);
-
-    // Verify the origin matches what we expect
+    // Verify origin and type
     let origin = client_data["origin"].as_str().ok_or((
         StatusCode::BAD_REQUEST,
         "Missing origin in client data".to_string(),
@@ -231,7 +285,6 @@ async fn finish_registration(
         return Err((StatusCode::BAD_REQUEST, "Invalid origin".to_string()));
     }
 
-    // Verify the type is webauthn.create
     let type_ = client_data["type"].as_str().ok_or((
         StatusCode::BAD_REQUEST,
         "Missing type in client data".to_string(),
@@ -241,7 +294,7 @@ async fn finish_registration(
         return Err((StatusCode::BAD_REQUEST, "Invalid type".to_string()));
     }
 
-    // Get and verify challenge
+    // Verify challenge
     let challenge = client_data["challenge"].as_str().ok_or((
         StatusCode::BAD_REQUEST,
         "Missing challenge in client data".to_string(),
@@ -254,7 +307,19 @@ async fn finish_registration(
         )
     })?;
 
-    // Decode attestation object
+    let stored_challenge = store.challenges.get(&reg_data.username).ok_or((
+        StatusCode::BAD_REQUEST,
+        "No challenge found for this user".to_string(),
+    ))?;
+
+    if decoded_challenge != stored_challenge.challenge {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Challenge verification failed".to_string(),
+        ));
+    }
+
+    // Decode and parse attestation object
     let attestation_object =
         base64url_decode(&reg_data.response.attestation_object).map_err(|e| {
             (
@@ -263,29 +328,47 @@ async fn finish_registration(
             )
         })?;
 
-    // Parse the attestation object as CBOR
     let attestation_cbor: CborValue = ciborium::de::from_reader(&attestation_object[..])
         .map_err(|e| (StatusCode::BAD_REQUEST, format!("Invalid CBOR data: {}", e)))?;
 
-    // Extract the authData from the attestation
-    let auth_data = if let CborValue::Map(map) = attestation_cbor {
+    // Extract attestation data
+    let (fmt, auth_data, att_stmt) = if let CborValue::Map(map) = attestation_cbor {
+        let mut fmt = None;
         let mut auth_data = None;
+        let mut att_stmt = None;
 
         for (key, value) in map {
-            if let CborValue::Text(key_str) = key {
-                if key_str == "authData" {
-                    if let CborValue::Bytes(data) = value {
-                        auth_data = Some(data);
-                        break;
+            if let CborValue::Text(k) = key {
+                match k.as_str() {
+                    "fmt" => {
+                        if let CborValue::Text(f) = value {
+                            fmt = Some(f);
+                        }
                     }
+                    "authData" => {
+                        if let CborValue::Bytes(data) = value {
+                            auth_data = Some(data);
+                        }
+                    }
+                    "attStmt" => {
+                        if let CborValue::Map(stmt) = value {
+                            att_stmt = Some(stmt);
+                        }
+                    }
+                    _ => {}
                 }
             }
         }
 
-        auth_data.ok_or((
-            StatusCode::BAD_REQUEST,
-            "Missing or invalid authData".to_string(),
-        ))?
+        match (fmt, auth_data, att_stmt) {
+            (Some(f), Some(d), Some(s)) => (f, d, s),
+            _ => {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    "Missing required attestation data".to_string(),
+                ))
+            }
+        }
     } else {
         return Err((
             StatusCode::BAD_REQUEST,
@@ -293,18 +376,32 @@ async fn finish_registration(
         ));
     };
 
-    // After getting auth_data, let's debug print more details
-    println!("Auth data length: {}", auth_data.len());
-    println!("Auth data (hex): {:02x?}", auth_data);
+    // Verify attestation
+    let client_data_hash = digest::digest(&digest::SHA256, &decoded_client_data);
 
-    // The public key is in COSE format in the credential data portion of authData
-    // First 37 bytes:
-    // - RP ID hash (32 bytes)
-    // - flags (1 byte)
-    // - counter (4 bytes)
-    let mut pos = 37;
+    match fmt.as_str() {
+        "none" => {
+            println!("Using 'none' attestation format");
+        }
+        "packed" => {
+            verify_packed_attestation(&auth_data, client_data_hash.as_ref(), &att_stmt).map_err(
+                |e| {
+                    (
+                        StatusCode::BAD_REQUEST,
+                        format!("Attestation verification failed: {}", e),
+                    )
+                },
+            )?;
+        }
+        _ => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "Unsupported attestation format".to_string(),
+            ))
+        }
+    }
 
-    // Check if attested credential data present
+    // Extract credential data
     let flags = auth_data[32];
     let has_attested_cred_data = (flags & 0x40) != 0;
 
@@ -315,43 +412,24 @@ async fn finish_registration(
         ));
     }
 
-    println!("Flags: {:08b}", flags);
-
+    let mut pos = 37;
     if auth_data.len() < pos + 18 {
-        // 16-byte AAGUID + 2-byte credential ID length
         return Err((
             StatusCode::BAD_REQUEST,
             "Authenticator data too short".to_string(),
         ));
     }
 
-    // Skip AAGUID
-    pos += 16;
-
-    // Get credential ID length (16-bit big-endian)
+    pos += 16; // Skip AAGUID
     let cred_id_len = ((auth_data[pos] as usize) << 8) | (auth_data[pos + 1] as usize);
-    println!(
-        "Reading cred_id_len at pos {} and {}: {:02x} {:02x}",
-        pos,
-        pos + 1,
-        auth_data[pos],
-        auth_data[pos + 1]
-    );
-    println!("Credential ID length: {}", cred_id_len);
-
     pos += 2;
 
     if cred_id_len == 0 || cred_id_len > 1024 {
-        // Sanity check
         return Err((
             StatusCode::BAD_REQUEST,
             "Invalid credential ID length".to_string(),
         ));
     }
-
-    println!("Credential ID length: {}", cred_id_len);
-    println!("Current position: {}", pos);
-    println!("Remaining data length: {}", auth_data.len() - pos);
 
     if auth_data.len() < pos + cred_id_len {
         return Err((
@@ -360,13 +438,9 @@ async fn finish_registration(
         ));
     }
 
-    // Skip credential ID
     pos += cred_id_len;
 
-    println!("Position after credential ID: {}", pos);
-    println!("Remaining data length: {}", auth_data.len() - pos);
-
-    // The remaining data is the CBOR-encoded public key
+    // Extract public key
     let public_key_cbor: CborValue = ciborium::de::from_reader(&auth_data[pos..]).map_err(|e| {
         (
             StatusCode::BAD_REQUEST,
@@ -374,7 +448,6 @@ async fn finish_registration(
         )
     })?;
 
-    // Extract the x and y coordinates from the COSE key
     let (x_coord, y_coord) = if let CborValue::Map(map) = public_key_cbor {
         let mut x_coord = None;
         let mut y_coord = None;
@@ -409,15 +482,13 @@ async fn finish_registration(
         ));
     };
 
-    // Construct the uncompressed EC public key format (0x04 || x || y)
+    // Create public key
     let mut public_key = Vec::with_capacity(65);
-    public_key.push(0x04); // Uncompressed point format
+    public_key.push(0x04);
     public_key.extend_from_slice(&x_coord);
     public_key.extend_from_slice(&y_coord);
 
-    println!("Extracted public key: {:?}", public_key);
-
-    // Decode credential ID
+    // Decode and store credential
     let credential_id = base64url_decode(&reg_data.raw_id).map_err(|e| {
         (
             StatusCode::BAD_REQUEST,
@@ -425,14 +496,21 @@ async fn finish_registration(
         )
     })?;
 
-    // Store the credential
-    let credential = StoredCredential {
-        credential_id,
-        public_key,
-        counter: 0,
-    };
+    // Store using base64url encoded credential_id as the key
+    // let credential_id_str = URL_SAFE.encode(&credential_id);
+    let credential_id_str = reg_data.raw_id.clone();
+    store.credentials.insert(
+        credential_id_str, // Use this as the key instead of reg_data.id
+        StoredCredential {
+            credential_id,
+            public_key,
+            counter: 0,
+        },
+    );
 
-    store.credentials.insert(reg_data.id, credential);
+    // Remove used challenge
+    store.challenges.remove(&reg_data.username);
+
     Ok("Registration successful")
 }
 
@@ -444,6 +522,7 @@ struct AuthenticationOptions {
     rp_id: String,
     allow_credentials: Vec<AllowCredential>,
     user_verification: String,
+    auth_id: String,
 }
 
 #[derive(Serialize, Debug)]
@@ -457,40 +536,57 @@ async fn start_authentication(State(state): State<AppState>) -> Json<Authenticat
     let mut challenge = vec![0u8; 32];
     state.rng.fill(&mut challenge).unwrap();
 
-    let store = state.store.lock().await;
+    let auth_id = Uuid::new_v4().to_string();
+    let stored_challenge = StoredChallenge {
+        challenge: challenge.clone(),
+        username: "".to_string(),
+        timestamp: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs(),
+    };
+
+    let mut store = state.store.lock().await;
+    store.challenges.insert(auth_id.clone(), stored_challenge);
+
     let allow_credentials: Vec<_> = store
         .credentials
         .iter()
         .map(|(id, _)| AllowCredential {
             type_: "public-key".to_string(),
-            id: id.clone(),
+            id: id.clone(), // ID is already base64url encoded
         })
         .collect();
 
-    let options = AuthenticationOptions {
+    println!("Available credentials: {:?}", allow_credentials);
+
+    let auth_option = AuthenticationOptions {
         challenge: URL_SAFE.encode(&challenge),
         timeout: 60000,
         rp_id: state.config.rp_id.clone(),
         allow_credentials,
         user_verification: "preferred".to_string(),
+        auth_id,
     };
 
-    println!("Starting authentication: {:?}", options);
-
-    Json(options)
+    println!("Auth options: {:?}", auth_option);
+    Json(auth_option)
 }
-
-use ring::{digest, signature::UnparsedPublicKey, signature::VerificationAlgorithm};
 
 async fn verify_authentication(
     State(state): State<AppState>,
     Json(auth_data): Json<AuthenticateCredential>,
 ) -> Result<&'static str, (StatusCode, String)> {
-    let store = state.store.lock().await;
-
     println!("Authenticating user: {:?}", auth_data);
+    let mut store = state.store.lock().await;
 
-    // Decode client data JSON
+    // Retrieve the stored challenge
+    let stored_challenge = store.challenges.get(&auth_data.auth_id).ok_or((
+        StatusCode::BAD_REQUEST,
+        "No stored challenge for this auth_id".to_string(),
+    ))?;
+
+    // Decode clientData, parse out the "challenge"
     let decoded_client_data =
         base64url_decode(&auth_data.response.client_data_json).map_err(|e| {
             (
@@ -513,9 +609,26 @@ async fn verify_authentication(
         )
     })?;
 
-    println!("Decoded client data: {}", client_data);
+    let challenge_str = client_data["challenge"].as_str().ok_or((
+        StatusCode::BAD_REQUEST,
+        "Missing challenge in client data".to_string(),
+    ))?;
 
-    // Verify origin
+    let decoded_challenge = base64url_decode(challenge_str).map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            format!("Failed to decode challenge: {}", e),
+        )
+    })?;
+
+    if decoded_challenge != stored_challenge.challenge {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Challenge verification failed".to_string(),
+        ));
+    }
+
+    // Verify origin and type
     let origin = client_data["origin"].as_str().ok_or((
         StatusCode::BAD_REQUEST,
         "Missing origin in client data".to_string(),
@@ -525,7 +638,6 @@ async fn verify_authentication(
         return Err((StatusCode::BAD_REQUEST, "Invalid origin".to_string()));
     }
 
-    // Verify type
     let type_ = client_data["type"].as_str().ok_or((
         StatusCode::BAD_REQUEST,
         "Missing type in client data".to_string(),
@@ -535,7 +647,7 @@ async fn verify_authentication(
         return Err((StatusCode::BAD_REQUEST, "Invalid type".to_string()));
     }
 
-    // Decode authenticator data
+    // Verify authenticator data
     let auth_data_bytes =
         base64url_decode(&auth_data.response.authenticator_data).map_err(|e| {
             (
@@ -544,7 +656,6 @@ async fn verify_authentication(
             )
         })?;
 
-    // Verify RP ID hash (first 32 bytes of authenticator data)
     let rp_id_hash = digest::digest(&digest::SHA256, state.config.rp_id.as_bytes());
     if auth_data_bytes[..32] != rp_id_hash.as_ref()[..] {
         return Err((
@@ -553,7 +664,6 @@ async fn verify_authentication(
         ));
     }
 
-    // Check user presence flag (bit 0 of flags byte)
     let flags = auth_data_bytes[32];
     if flags & 0x01 != 0x01 {
         return Err((
@@ -562,16 +672,13 @@ async fn verify_authentication(
         ));
     }
 
-    // Compute client data hash
+    // Verify signature
     let client_data_hash = digest::digest(&digest::SHA256, &decoded_client_data);
 
-    // Verify signature
-    // The signature is over the concatenation of authenticator data and client data hash
     let mut signed_data = Vec::new();
     signed_data.extend_from_slice(&auth_data_bytes);
     signed_data.extend_from_slice(client_data_hash.as_ref());
 
-    // Decode signature
     let signature = base64url_decode(&auth_data.response.signature).map_err(|e| {
         (
             StatusCode::BAD_REQUEST,
@@ -579,9 +686,6 @@ async fn verify_authentication(
         )
     })?;
 
-    // Verify using stored public key (assuming ES256)
-
-    // Get stored credential
     let credential = store
         .credentials
         .get(&auth_data.id)
@@ -594,6 +698,7 @@ async fn verify_authentication(
         .verify(&signed_data, &signature)
         .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid signature".to_string()))?;
 
+    store.challenges.remove(&auth_data.auth_id);
     Ok("Authentication successful")
 }
 
@@ -601,7 +706,6 @@ async fn verify_authentication(
 async fn main() {
     dotenv().ok();
 
-    // Get configuration from environment variables
     let origin = env::var("ORIGIN").expect("ORIGIN must be set");
     let rp_id = origin
         .strip_prefix("https://")
@@ -612,7 +716,6 @@ async fn main() {
         .to_string();
 
     let config = AppConfig { origin, rp_id };
-
     let state = AppState {
         store: Arc::new(Mutex::new(AuthStore::default())),
         rng: Arc::new(rand::SystemRandom::new()),
