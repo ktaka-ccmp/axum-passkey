@@ -1,3 +1,24 @@
+/// This module handles the authentication process using WebAuthn.
+/// It provides routes for starting and verifying authentication.
+///
+/// The main components are:
+/// - `router`: Sets up the routes for authentication.
+/// - `start_authentication`: Initiates the authentication process by generating a challenge.
+/// - `verify_authentication`: Verifies the authentication response from the client.
+///
+/// # Structures
+/// - `AuthenticationOptions`: Represents the options for authentication.
+/// - `AllowCredential`: Represents allowed credentials for authentication.
+/// - `AuthenticateCredential`: Represents the credential data received from the client.
+/// - `AuthenticatorAssertionResponse`: Represents the response from the authenticator.
+///
+/// # Functions
+/// - `start_authentication`: Generates a challenge and returns authentication options.
+/// - `verify_authentication`: Verifies the client's response to the authentication challenge.
+///
+/// # Errors
+/// The functions return appropriate HTTP status codes and error messages in case of failures,
+/// such as invalid client data, challenge verification failure, invalid origin, and invalid signature.
 use axum::{
     extract::State,
     http::StatusCode,
@@ -89,6 +110,7 @@ async fn start_authentication(State(state): State<AppState>) -> Json<Authenticat
         })
         .collect();
 
+    #[cfg(debug_assertions)]
     println!("Available credentials: {:?}", allow_credentials);
 
     let auth_option = AuthenticationOptions {
@@ -100,6 +122,7 @@ async fn start_authentication(State(state): State<AppState>) -> Json<Authenticat
         auth_id,
     };
 
+    #[cfg(debug_assertions)]
     println!("Auth options: {:?}", auth_option);
     Json(auth_option)
 }
@@ -108,7 +131,9 @@ async fn verify_authentication(
     State(state): State<AppState>,
     Json(auth_data): Json<AuthenticateCredential>,
 ) -> Result<&'static str, (StatusCode, String)> {
+    #[cfg(debug_assertions)]
     println!("Authenticating user: {:?}", auth_data);
+
     let mut store = state.store.lock().await;
 
     // Retrieve the stored challenge
@@ -116,6 +141,12 @@ async fn verify_authentication(
         StatusCode::BAD_REQUEST,
         "No stored challenge for this auth_id".to_string(),
     ))?;
+
+    #[cfg(debug_assertions)]
+    println!(
+        "Stored challenge: {:?}",
+        URL_SAFE.encode(&stored_challenge.challenge)
+    );
 
     // Decode clientData, parse out the "challenge"
     let decoded_client_data =
@@ -139,6 +170,9 @@ async fn verify_authentication(
             format!("Invalid client data JSON: {}", e),
         )
     })?;
+
+    #[cfg(debug_assertions)]
+    println!("Client data: {:?}", client_data);
 
     let challenge_str = client_data["challenge"].as_str().ok_or((
         StatusCode::BAD_REQUEST,
@@ -179,7 +213,7 @@ async fn verify_authentication(
     }
 
     // Verify authenticator data
-    let auth_data_bytes =
+    let authenticator_data =
         base64url_decode(&auth_data.response.authenticator_data).map_err(|e| {
             (
                 StatusCode::BAD_REQUEST,
@@ -188,14 +222,14 @@ async fn verify_authentication(
         })?;
 
     let rp_id_hash = digest::digest(&digest::SHA256, state.config.rp_id.as_bytes());
-    if auth_data_bytes[..32] != rp_id_hash.as_ref()[..] {
+    if authenticator_data[..32] != rp_id_hash.as_ref()[..] {
         return Err((
             StatusCode::BAD_REQUEST,
             "Invalid RP ID hash in authenticator data".to_string(),
         ));
     }
 
-    let flags = auth_data_bytes[32];
+    let flags = authenticator_data[32];
     if flags & 0x01 != 0x01 {
         return Err((
             StatusCode::BAD_REQUEST,
@@ -203,12 +237,21 @@ async fn verify_authentication(
         ));
     }
 
+    #[cfg(debug_assertions)]
+    println!(
+        "authenticator_data: {:?}",
+        URL_SAFE.encode(&authenticator_data)
+    );
+
     // Verify signature
     let client_data_hash = digest::digest(&digest::SHA256, &decoded_client_data);
 
     let mut signed_data = Vec::new();
-    signed_data.extend_from_slice(&auth_data_bytes);
+    signed_data.extend_from_slice(&authenticator_data);
     signed_data.extend_from_slice(client_data_hash.as_ref());
+
+    #[cfg(debug_assertions)]
+    println!("Signed data: {:?}", URL_SAFE.encode(&signed_data));
 
     let signature = base64url_decode(&auth_data.response.signature).map_err(|e| {
         (
@@ -217,6 +260,9 @@ async fn verify_authentication(
         )
     })?;
 
+    #[cfg(debug_assertions)]
+    println!("Signature: {:?}", URL_SAFE.encode(&signature));
+
     let credential = store
         .credentials
         .get(&auth_data.id)
@@ -224,6 +270,9 @@ async fn verify_authentication(
 
     let verification_algorithm = &ring::signature::ECDSA_P256_SHA256_ASN1;
     let public_key = UnparsedPublicKey::new(verification_algorithm, &credential.public_key);
+
+    #[cfg(debug_assertions)]
+    println!("Public key: {:?}", URL_SAFE.encode(&credential.public_key));
 
     public_key
         .verify(&signed_data, &signature)

@@ -40,6 +40,7 @@ fn base64url_decode(input: &str) -> Result<Vec<u8>, base64::DecodeError> {
 }
 
 // Public things
+pub(crate) mod attestation;
 pub(crate) mod auth;
 pub(crate) mod register;
 
@@ -63,6 +64,7 @@ pub(crate) fn app_state() -> AppState {
         .to_string();
 
     let config = AppConfig { origin, rp_id };
+
     AppState {
         store: Arc::new(Mutex::new(AuthStore::default())),
         rng: Arc::new(rand::SystemRandom::new()),
