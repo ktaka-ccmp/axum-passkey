@@ -150,7 +150,39 @@ async fn finish_registration(
     println!("Registering user: {:?}", reg_data);
     let mut store = state.store.lock().await;
 
-    // Decode and verify client data
+    verify_client_data(&state, &reg_data, &store).await?;
+
+    let public_key = extract_credential_public_key(&reg_data)?;
+
+    // Decode and store credential
+    let credential_id = base64url_decode(&reg_data.raw_id).map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            format!("Failed to decode credential ID: {}", e),
+        )
+    })?;
+
+    // Store using base64url encoded credential_id as the key
+    // let credential_id_str = URL_SAFE.encode(&credential_id);
+    let credential_id_str = reg_data.raw_id.clone();
+    store.credentials.insert(
+        credential_id_str, // Use this as the key instead of reg_data.id
+        StoredCredential {
+            credential_id,
+            public_key,
+            counter: 0,
+        },
+    );
+
+    // Remove used challenge
+    store.challenges.remove(&reg_data.username);
+
+    Ok("Registration successful")
+}
+
+fn extract_credential_public_key(
+    reg_data: &RegisterCredential,
+) -> Result<Vec<u8>, (StatusCode, String)> {
     let decoded_client_data =
         base64url_decode(&reg_data.response.client_data_json).map_err(|e| {
             (
@@ -159,65 +191,6 @@ async fn finish_registration(
             )
         })?;
 
-    let client_data_str = String::from_utf8(decoded_client_data.clone()).map_err(|e| {
-        (
-            StatusCode::BAD_REQUEST,
-            format!("Client data is not valid UTF-8: {}", e),
-        )
-    })?;
-
-    let client_data: serde_json::Value = serde_json::from_str(&client_data_str).map_err(|e| {
-        (
-            StatusCode::BAD_REQUEST,
-            format!("Invalid client data JSON: {}", e),
-        )
-    })?;
-
-    // Verify origin and type
-    let origin = client_data["origin"].as_str().ok_or((
-        StatusCode::BAD_REQUEST,
-        "Missing origin in client data".to_string(),
-    ))?;
-
-    if origin != state.config.origin {
-        return Err((StatusCode::BAD_REQUEST, "Invalid origin".to_string()));
-    }
-
-    let type_ = client_data["type"].as_str().ok_or((
-        StatusCode::BAD_REQUEST,
-        "Missing type in client data".to_string(),
-    ))?;
-
-    if type_ != "webauthn.create" {
-        return Err((StatusCode::BAD_REQUEST, "Invalid type".to_string()));
-    }
-
-    // Verify challenge
-    let challenge = client_data["challenge"].as_str().ok_or((
-        StatusCode::BAD_REQUEST,
-        "Missing challenge in client data".to_string(),
-    ))?;
-
-    let decoded_challenge = base64url_decode(challenge).map_err(|e| {
-        (
-            StatusCode::BAD_REQUEST,
-            format!("Failed to decode challenge: {}", e),
-        )
-    })?;
-
-    let stored_challenge = store.challenges.get(&reg_data.username).ok_or((
-        StatusCode::BAD_REQUEST,
-        "No challenge found for this user".to_string(),
-    ))?;
-
-    if decoded_challenge != stored_challenge.challenge {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            "Challenge verification failed".to_string(),
-        ));
-    }
-
-    // Decode and parse attestation object
     let attestation_object =
         base64url_decode(&reg_data.response.attestation_object).map_err(|e| {
             (
@@ -225,11 +198,9 @@ async fn finish_registration(
                 format!("Failed to decode attestation object: {}", e),
             )
         })?;
-
     let attestation_cbor: CborValue = ciborium::de::from_reader(&attestation_object[..])
         .map_err(|e| (StatusCode::BAD_REQUEST, format!("Invalid CBOR data: {}", e)))?;
 
-    // Extract attestation data
     let (fmt, auth_data, att_stmt) = if let CborValue::Map(map) = attestation_cbor {
         let mut fmt = None;
         let mut auth_data = None;
@@ -274,9 +245,7 @@ async fn finish_registration(
         ));
     };
 
-    // Verify attestation
     let client_data_hash = digest::digest(&digest::SHA256, &decoded_client_data);
-
     match fmt.as_str() {
         "none" => {
             println!("Using 'none' attestation format");
@@ -302,10 +271,8 @@ async fn finish_registration(
         }
     }
 
-    // Extract credential data
     let flags = auth_data[32];
     let has_attested_cred_data = (flags & 0x40) != 0;
-
     if !has_attested_cred_data {
         return Err((
             StatusCode::BAD_REQUEST,
@@ -321,10 +288,9 @@ async fn finish_registration(
         ));
     }
 
-    pos += 16; // Skip AAGUID
+    pos += 16;
     let cred_id_len = ((auth_data[pos] as usize) << 8) | (auth_data[pos + 1] as usize);
     pos += 2;
-
     if cred_id_len == 0 || cred_id_len > 1024 {
         return Err((
             StatusCode::BAD_REQUEST,
@@ -338,10 +304,7 @@ async fn finish_registration(
             "Authenticator data too short for credential ID".to_string(),
         ));
     }
-
     pos += cred_id_len;
-
-    // Extract public key
     let public_key_cbor: CborValue = ciborium::de::from_reader(&auth_data[pos..]).map_err(|e| {
         (
             StatusCode::BAD_REQUEST,
@@ -382,35 +345,82 @@ async fn finish_registration(
             "Invalid public key format".to_string(),
         ));
     };
-
-    // Create public key
     let mut public_key = Vec::with_capacity(65);
     public_key.push(0x04);
     public_key.extend_from_slice(&x_coord);
     public_key.extend_from_slice(&y_coord);
+    Ok(public_key)
+}
 
-    // Decode and store credential
-    let credential_id = base64url_decode(&reg_data.raw_id).map_err(|e| {
+async fn verify_client_data(
+    state: &AppState,
+    reg_data: &RegisterCredential,
+    store: &tokio::sync::MutexGuard<'_, super::AuthStore>,
+) -> Result<(), (StatusCode, String)> {
+    // Decode and verify client data
+    let decoded_client_data =
+        base64url_decode(&reg_data.response.client_data_json).map_err(|e| {
+            (
+                StatusCode::BAD_REQUEST,
+                format!("Failed to decode client data: {}", e),
+            )
+        })?;
+
+    let client_data_str = String::from_utf8(decoded_client_data.clone()).map_err(|e| {
         (
             StatusCode::BAD_REQUEST,
-            format!("Failed to decode credential ID: {}", e),
+            format!("Client data is not valid UTF-8: {}", e),
         )
     })?;
 
-    // Store using base64url encoded credential_id as the key
-    // let credential_id_str = URL_SAFE.encode(&credential_id);
-    let credential_id_str = reg_data.raw_id.clone();
-    store.credentials.insert(
-        credential_id_str, // Use this as the key instead of reg_data.id
-        StoredCredential {
-            credential_id,
-            public_key,
-            counter: 0,
-        },
-    );
+    let client_data: serde_json::Value = serde_json::from_str(&client_data_str).map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            format!("Invalid client data JSON: {}", e),
+        )
+    })?;
 
-    // Remove used challenge
-    store.challenges.remove(&reg_data.username);
+    let origin = client_data["origin"].as_str().ok_or((
+        StatusCode::BAD_REQUEST,
+        "Missing origin in client data".to_string(),
+    ))?;
 
-    Ok("Registration successful")
+    if origin != state.config.origin {
+        return Err((StatusCode::BAD_REQUEST, "Invalid origin".to_string()));
+    }
+
+    let type_ = client_data["type"].as_str().ok_or((
+        StatusCode::BAD_REQUEST,
+        "Missing type in client data".to_string(),
+    ))?;
+
+    if type_ != "webauthn.create" {
+        return Err((StatusCode::BAD_REQUEST, "Invalid type".to_string()));
+    }
+
+    let challenge = client_data["challenge"].as_str().ok_or((
+        StatusCode::BAD_REQUEST,
+        "Missing challenge in client data".to_string(),
+    ))?;
+
+    let decoded_challenge = base64url_decode(challenge).map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            format!("Failed to decode challenge: {}", e),
+        )
+    })?;
+
+    let stored_challenge = store.challenges.get(&reg_data.username).ok_or((
+        StatusCode::BAD_REQUEST,
+        "No challenge found for this user".to_string(),
+    ))?;
+
+    if decoded_challenge != stored_challenge.challenge {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Challenge verification failed".to_string(),
+        ));
+    }
+
+    Ok(())
 }
