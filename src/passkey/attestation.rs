@@ -1,8 +1,11 @@
+use axum::http::StatusCode;
 use ciborium::value::{Integer, Value as CborValue};
-use ring::signature::UnparsedPublicKey;
+use ring::{digest, signature::UnparsedPublicKey};
 use std::time::SystemTime;
 use webpki::EndEntityCert;
 use x509_parser::{certificate::X509Certificate, prelude::*, time::ASN1Time};
+
+use crate::passkey::AttestationObject;
 
 // Constants for FIDO OIDs
 const OID_FIDO_GEN_CE_AAGUID: &str = "1.3.6.1.4.1.45724.1.1.4";
@@ -11,7 +14,36 @@ const EC2_KEY_TYPE: i64 = 2;
 const ES256_ALG: i64 = -7;
 const COORD_LENGTH: usize = 32;
 
-pub(crate) fn verify_packed_attestation(
+pub(super) fn verify_attestation(
+    attestation: &AttestationObject,
+    client_data: &[u8],
+) -> Result<(), (StatusCode, String)> {
+    let client_data_hash = digest::digest(&digest::SHA256, client_data);
+
+    match attestation.fmt.as_str() {
+        "none" => {
+            println!("Using 'none' attestation format");
+            Ok(())
+        }
+        "packed" => verify_packed_attestation(
+            &attestation.auth_data,
+            client_data_hash.as_ref(),
+            &attestation.att_stmt,
+        )
+        .map_err(|e| {
+            (
+                StatusCode::BAD_REQUEST,
+                format!("Attestation verification failed: {:?}", e),
+            )
+        }),
+        _ => Err((
+            StatusCode::BAD_REQUEST,
+            "Unsupported attestation format".to_string(),
+        )),
+    }
+}
+
+fn verify_packed_attestation(
     auth_data: &[u8],
     client_data_hash: &[u8],
     att_stmt: &Vec<(CborValue, CborValue)>,

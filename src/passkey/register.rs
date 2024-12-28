@@ -7,11 +7,11 @@ use axum::{
 
 use base64::engine::{general_purpose::URL_SAFE, Engine};
 use ciborium::value::{Integer, Value as CborValue};
-use ring::{digest, rand::SecureRandom};
+use ring::rand::SecureRandom;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::passkey::{base64url_decode, StoredChallenge, StoredCredential};
+use crate::passkey::{base64url_decode, AttestationObject, StoredChallenge, StoredCredential};
 use crate::AppState;
 
 pub(crate) fn router(state: AppState) -> Router {
@@ -191,17 +191,31 @@ fn extract_credential_public_key(
             )
         })?;
 
-    let attestation_object =
-        base64url_decode(&reg_data.response.attestation_object).map_err(|e| {
-            (
-                StatusCode::BAD_REQUEST,
-                format!("Failed to decode attestation object: {}", e),
-            )
-        })?;
-    let attestation_cbor: CborValue = ciborium::de::from_reader(&attestation_object[..])
+    let attestation_obj = parse_attestation_object(&reg_data.response.attestation_object)?;
+
+    // Verify attestation based on format
+    crate::passkey::attestation::verify_attestation(&attestation_obj, &decoded_client_data)?;
+
+    // Extract public key from authenticator data
+    let public_key = extract_public_key_from_auth_data(&attestation_obj.auth_data)?;
+
+    Ok(public_key)
+}
+
+fn parse_attestation_object(
+    attestation_base64: &str,
+) -> Result<AttestationObject, (StatusCode, String)> {
+    let attestation_bytes = base64url_decode(attestation_base64).map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            format!("Failed to decode attestation object: {}", e),
+        )
+    })?;
+
+    let attestation_cbor: CborValue = ciborium::de::from_reader(&attestation_bytes[..])
         .map_err(|e| (StatusCode::BAD_REQUEST, format!("Invalid CBOR data: {}", e)))?;
 
-    let (fmt, auth_data, att_stmt) = if let CborValue::Map(map) = attestation_cbor {
+    if let CborValue::Map(map) = attestation_cbor {
         let mut fmt = None;
         let mut auth_data = None;
         let mut att_stmt = None;
@@ -230,47 +244,26 @@ fn extract_credential_public_key(
         }
 
         match (fmt, auth_data, att_stmt) {
-            (Some(f), Some(d), Some(s)) => (f, d, s),
-            _ => {
-                return Err((
-                    StatusCode::BAD_REQUEST,
-                    "Missing required attestation data".to_string(),
-                ))
-            }
+            (Some(f), Some(d), Some(s)) => Ok(AttestationObject {
+                fmt: f,
+                auth_data: d,
+                att_stmt: s,
+            }),
+            _ => Err((
+                StatusCode::BAD_REQUEST,
+                "Missing required attestation data".to_string(),
+            )),
         }
     } else {
-        return Err((
+        Err((
             StatusCode::BAD_REQUEST,
             "Invalid attestation format".to_string(),
-        ));
-    };
-
-    let client_data_hash = digest::digest(&digest::SHA256, &decoded_client_data);
-    match fmt.as_str() {
-        "none" => {
-            println!("Using 'none' attestation format");
-        }
-        "packed" => {
-            crate::passkey::attestation::verify_packed_attestation(
-                &auth_data,
-                client_data_hash.as_ref(),
-                &att_stmt,
-            )
-            .map_err(|e| {
-                (
-                    StatusCode::BAD_REQUEST,
-                    format!("Attestation verification failed: {:?}", e),
-                )
-            })?;
-        }
-        _ => {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                "Unsupported attestation format".to_string(),
-            ))
-        }
+        ))
     }
+}
 
+fn extract_public_key_from_auth_data(auth_data: &[u8]) -> Result<Vec<u8>, (StatusCode, String)> {
+    // Check attested credential data flag
     let flags = auth_data[32];
     let has_attested_cred_data = (flags & 0x40) != 0;
     if !has_attested_cred_data {
@@ -280,7 +273,24 @@ fn extract_credential_public_key(
         ));
     }
 
-    let mut pos = 37;
+    // Parse credential data
+    let credential_data = parse_credential_data(auth_data)?;
+
+    // Extract public key coordinates
+    let (x_coord, y_coord) = extract_key_coordinates(credential_data)?;
+
+    // Format public key
+    let mut public_key = Vec::with_capacity(65);
+    public_key.push(0x04); // Uncompressed point format
+    public_key.extend_from_slice(&x_coord);
+    public_key.extend_from_slice(&y_coord);
+
+    Ok(public_key)
+}
+
+fn parse_credential_data(auth_data: &[u8]) -> Result<&[u8], (StatusCode, String)> {
+    let mut pos = 37; // Skip RP ID hash (32) + flags (1) + counter (4)
+
     if auth_data.len() < pos + 18 {
         return Err((
             StatusCode::BAD_REQUEST,
@@ -288,9 +298,12 @@ fn extract_credential_public_key(
         ));
     }
 
-    pos += 16;
+    pos += 16; // Skip AAGUID
+
+    // Get credential ID length
     let cred_id_len = ((auth_data[pos] as usize) << 8) | (auth_data[pos + 1] as usize);
     pos += 2;
+
     if cred_id_len == 0 || cred_id_len > 1024 {
         return Err((
             StatusCode::BAD_REQUEST,
@@ -304,15 +317,23 @@ fn extract_credential_public_key(
             "Authenticator data too short for credential ID".to_string(),
         ));
     }
+
     pos += cred_id_len;
-    let public_key_cbor: CborValue = ciborium::de::from_reader(&auth_data[pos..]).map_err(|e| {
+
+    Ok(&auth_data[pos..])
+}
+
+fn extract_key_coordinates(
+    credential_data: &[u8],
+) -> Result<(Vec<u8>, Vec<u8>), (StatusCode, String)> {
+    let public_key_cbor: CborValue = ciborium::de::from_reader(credential_data).map_err(|e| {
         (
             StatusCode::BAD_REQUEST,
             format!("Invalid public key CBOR: {}", e),
         )
     })?;
 
-    let (x_coord, y_coord) = if let CborValue::Map(map) = public_key_cbor {
+    if let CborValue::Map(map) = public_key_cbor {
         let mut x_coord = None;
         let mut y_coord = None;
 
@@ -331,25 +352,18 @@ fn extract_credential_public_key(
         }
 
         match (x_coord, y_coord) {
-            (Some(x), Some(y)) => (x, y),
-            _ => {
-                return Err((
-                    StatusCode::BAD_REQUEST,
-                    "Missing or invalid key coordinates".to_string(),
-                ))
-            }
+            (Some(x), Some(y)) => Ok((x, y)),
+            _ => Err((
+                StatusCode::BAD_REQUEST,
+                "Missing or invalid key coordinates".to_string(),
+            )),
         }
     } else {
-        return Err((
+        Err((
             StatusCode::BAD_REQUEST,
             "Invalid public key format".to_string(),
-        ));
-    };
-    let mut public_key = Vec::with_capacity(65);
-    public_key.push(0x04);
-    public_key.extend_from_slice(&x_coord);
-    public_key.extend_from_slice(&y_coord);
-    Ok(public_key)
+        ))
+    }
 }
 
 async fn verify_client_data(

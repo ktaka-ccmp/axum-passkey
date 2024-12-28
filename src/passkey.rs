@@ -1,4 +1,5 @@
 use base64::engine::{general_purpose::URL_SAFE, Engine};
+use ciborium::value::Value as CborValue;
 use dotenv::dotenv;
 use ring::rand;
 use serde::{Deserialize, Serialize};
@@ -37,6 +38,13 @@ fn base64url_decode(input: &str) -> Result<Vec<u8>, base64::DecodeError> {
     let padding_len = (4 - input.len() % 4) % 4;
     let padded = format!("{}{}", input, "=".repeat(padding_len));
     URL_SAFE.decode(padded)
+}
+
+#[derive(Debug)]
+struct AttestationObject {
+    fmt: String,
+    auth_data: Vec<u8>,
+    att_stmt: Vec<(CborValue, CborValue)>,
 }
 
 // Public things
