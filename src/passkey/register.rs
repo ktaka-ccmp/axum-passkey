@@ -131,7 +131,7 @@ async fn start_registration(
             user_verification: "preferred".to_string(),
         },
         timeout: 60000,
-        attestation: "none".to_string(),
+        attestation: "direct".to_string(),
     };
 
     #[cfg(not(debug_assertions))]
@@ -242,6 +242,9 @@ fn parse_attestation_object(
                 }
             }
         }
+
+        #[cfg(debug_assertions)]
+        println!("Attestation format: {:?}, auth data: {:?}, attestation statement: {:?}", fmt, auth_data, att_stmt);
 
         match (fmt, auth_data, att_stmt) {
             (Some(f), Some(d), Some(s)) => Ok(AttestationObject {

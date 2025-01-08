@@ -7,7 +7,7 @@ use x509_parser::{certificate::X509Certificate, prelude::*, time::ASN1Time};
 
 use crate::passkey::AttestationObject;
 
-// Constants for FIDO OIDs
+// Constants for FIDO OIDs id-fido-gen-ce-aaguid
 const OID_FIDO_GEN_CE_AAGUID: &str = "1.3.6.1.4.1.45724.1.1.4";
 
 const EC2_KEY_TYPE: i64 = 2;
@@ -178,7 +178,13 @@ fn verify_packed_attestation_cert(cert: &X509Certificate, auth_data: &[u8]) -> R
         let auth_data_aaguid = &auth_data[37..53];
         let cert_aaguid = fido_ext.value;
 
-        if auth_data_aaguid != cert_aaguid {
+        // The format of this extension typically includes:
+        // 0x04: This byte indicates the ASN.1 tag for an OCTET STRING.
+        // 0x10: This byte represents the length of the OCTET STRING in hexadecimal, which is 16 bytes (decimal 16).
+        // #[cfg(debug_assertions)]
+        // println!("auth_data_aaguid: {:?}, cert_aaguid: {:?}", auth_data_aaguid, &cert_aaguid[2..]);
+
+        if auth_data_aaguid != &cert_aaguid[2..] {
             return Err("AAGUID mismatch between certificate and authenticator data".to_string());
         }
     }
