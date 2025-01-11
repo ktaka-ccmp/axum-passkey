@@ -181,10 +181,7 @@ async fn finish_registration(
             credential_id,
             public_key,
             counter: 0,
-            user: PublicKeyCredentialUserEntity {
-                id: "some_internal_user_id_that_stays_in_the_server".to_string(),
-                ..stored_user
-            },
+            user: stored_user,
         },
     );
 

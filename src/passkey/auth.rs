@@ -290,9 +290,17 @@ async fn verify_authentication(
         .config
         .authenticator_selection
         .authenticator_attachment
-        .as_deref();
+        .clone();
+
     let received = auth_response.authenticator_attachment.as_deref();
-    if expected != received {
+
+    #[cfg(debug_assertions)]
+    println!(
+        "Expected attachment: {:?}, received attachment: {:?}",
+        expected, received
+    );
+
+    if expected.is_some() && expected.as_deref() != received {
         return Err(WebAuthnError::InvalidAuthenticator("Invalid attachment".into()).into());
     }
 
@@ -309,7 +317,26 @@ async fn verify_authentication(
         .credentials
         .get(&auth_response.id)
         .ok_or(WebAuthnError::InvalidSignature("Unknown credential".into()))?;
-    println!("user in credintials: {:?}", &credential.user);
+
+    let user_handle = auth_response
+        .response
+        .user_handle
+        .as_ref()
+        .and_then(|handle| {
+            base64url_decode(handle)
+                .ok()
+                .and_then(|decoded| String::from_utf8(decoded).ok())
+        })
+        .unwrap_or("default".to_string());
+
+    #[cfg(debug_assertions)]
+    println!("user_info stored in credential: {:?}", &credential.user);
+    #[cfg(debug_assertions)]
+    println!("user_handle received from client: {:?}", &user_handle);
+
+    if credential.user.id != user_handle {
+        return Err(WebAuthnError::InvalidSignature("User handle mismatch".into()).into());
+    }
 
     let verification_algorithm = &ring::signature::ECDSA_P256_SHA256_ASN1;
     let public_key = UnparsedPublicKey::new(verification_algorithm, &credential.public_key);
@@ -332,17 +359,6 @@ async fn verify_authentication(
 
     // Cleanup and return success
     store.challenges.remove(&auth_response.auth_id);
-
-    let user_name = auth_response
-        .response
-        .user_handle
-        .as_ref()
-        .and_then(|handle| {
-            base64url_decode(handle)
-                .ok()
-                .and_then(|decoded| String::from_utf8(decoded).ok())
-        });
-    println!("user name: {:?}", user_name);
 
     Ok("Authentication successful")
 }

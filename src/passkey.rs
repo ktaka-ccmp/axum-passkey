@@ -94,6 +94,7 @@ pub(crate) fn app_state() -> AppState {
         // "platform", "cross-platform" or None.
         // We prefer platform authenticators i.e. to use Google's password manager.
         authenticator_attachment: Some("platform".to_string()),
+        // authenticator_attachment: None,
 
         // Discoverable credentials are supported by platform authenticators, so require it.
         resident_key: "required".to_string(), // "required", "preferred", "discouraged"
