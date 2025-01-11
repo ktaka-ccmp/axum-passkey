@@ -12,7 +12,8 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::passkey::{
-    base64url_decode, AttestationObject, AuthenticatorSelection, StoredChallenge, StoredCredential,
+    base64url_decode, AttestationObject, AuthenticatorSelection, PublicKeyCredentialUserEntity,
+    StoredChallenge, StoredCredential,
 };
 use crate::AppState;
 
@@ -29,14 +30,6 @@ pub(crate) fn router(state: AppState) -> Router {
             }),
         )
         .with_state(state)
-}
-
-#[derive(Serialize, Debug)]
-struct PublicKeyCredentialUserEntity {
-    id: String,
-    name: String,
-    #[serde(rename = "displayName")]
-    display_name: String,
 }
 
 #[derive(Serialize, Debug)]
@@ -73,7 +66,8 @@ struct RegisterCredential {
     response: AuthenticatorAttestationResponse,
     #[serde(rename = "type")]
     type_: String,
-    username: String,
+    username: Option<String>,
+    user_handle: Option<String>,
 }
 
 #[derive(Deserialize, Debug)]
@@ -88,12 +82,18 @@ async fn start_registration(
 ) -> Json<RegistrationOptions> {
     println!("Registering user: {}", username);
 
+    let user_info = PublicKeyCredentialUserEntity {
+        id: Uuid::new_v4().to_string(),
+        name: username.clone(),
+        display_name: username.clone(),
+    };
+
     let mut challenge = vec![0u8; 32];
     state.rng.fill(&mut challenge).unwrap();
 
     let stored_challenge = StoredChallenge {
         challenge: challenge.clone(),
-        username: username.clone(),
+        user: user_info.clone(),
         timestamp: std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -101,7 +101,9 @@ async fn start_registration(
     };
 
     let mut store = state.store.lock().await;
-    store.challenges.insert(username.clone(), stored_challenge);
+    store
+        .challenges
+        .insert(user_info.id.clone(), stored_challenge);
 
     let options = RegistrationOptions {
         challenge: URL_SAFE.encode(&challenge),
@@ -110,15 +112,17 @@ async fn start_registration(
             name: "Passkey Demo".to_string(),
             id: state.config.rp_id.clone(),
         },
-        user: PublicKeyCredentialUserEntity {
-            id: Uuid::new_v4().to_string(),
-            name: username.clone(),
-            display_name: username,
-        },
-        pub_key_cred_params: vec![PubKeyCredParam {
-            type_: "public-key".to_string(),
-            alg: -7,
-        }],
+        user: user_info,
+        pub_key_cred_params: vec![
+            PubKeyCredParam {
+                type_: "public-key".to_string(),
+                alg: -7,
+            },
+            PubKeyCredParam {
+                type_: "public-key".to_string(),
+                alg: -257,
+            },
+        ],
         authenticator_selection: state.config.authenticator_selection.clone(),
         timeout: 60000,
         attestation: "direct".to_string(),
@@ -152,6 +156,22 @@ async fn finish_registration(
         )
     })?;
 
+    let user_handle = reg_data.user_handle.as_ref().ok_or((
+        StatusCode::BAD_REQUEST,
+        "User handle is missing".to_string(),
+    ))?;
+    let stored_user = store
+        .challenges
+        .get(user_handle)
+        .ok_or((
+            StatusCode::BAD_REQUEST,
+            "No challenge found for this user".to_string(),
+        ))?
+        .user
+        .clone();
+
+    // let username = stored_user.name.clone();
+
     // Store using base64url encoded credential_id as the key
     // let credential_id_str = URL_SAFE.encode(&credential_id);
     let credential_id_str = reg_data.raw_id.clone();
@@ -161,11 +181,15 @@ async fn finish_registration(
             credential_id,
             public_key,
             counter: 0,
+            user: PublicKeyCredentialUserEntity {
+                id: "some_internal_user_id_that_stays_in_the_server".to_string(),
+                ..stored_user
+            },
         },
     );
 
     // Remove used challenge
-    store.challenges.remove(&reg_data.username);
+    store.challenges.remove(user_handle);
 
     Ok("Registration successful")
 }
@@ -181,6 +205,24 @@ fn extract_credential_public_key(
                 format!("Failed to decode client data: {}", e),
             )
         })?;
+
+    let decoded_client_data_json = String::from_utf8(decoded_client_data.clone())
+        .map_err(|e| {
+            (
+                StatusCode::BAD_REQUEST,
+                format!("Client data is not valid UTF-8: {}", e),
+            )
+        })
+        .and_then(|s: String| {
+            serde_json::from_str::<serde_json::Value>(&s).map_err(|e| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    format!("Failed to parse client data JSON: {}", e),
+                )
+            })
+        })?;
+
+    println!("Client data json: {:?}", decoded_client_data_json);
 
     let attestation_obj = parse_attestation_object(&reg_data.response.attestation_object)?;
 
@@ -421,7 +463,12 @@ async fn verify_client_data(
         )
     })?;
 
-    let stored_challenge = store.challenges.get(&reg_data.username).ok_or((
+    let user_handle = reg_data.user_handle.as_ref().ok_or((
+        StatusCode::BAD_REQUEST,
+        "User handle is missing".to_string(),
+    ))?;
+
+    let stored_challenge = store.challenges.get(user_handle).ok_or((
         StatusCode::BAD_REQUEST,
         "No challenge found for this user".to_string(),
     ))?;

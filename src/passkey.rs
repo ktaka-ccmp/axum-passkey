@@ -33,8 +33,16 @@ struct AuthStore {
 #[derive(Clone, Serialize, Deserialize, Debug)]
 struct StoredChallenge {
     challenge: Vec<u8>,
-    username: String,
+    user: PublicKeyCredentialUserEntity,
     timestamp: u64,
+}
+
+#[derive(Clone, Serialize, Deserialize, Debug)]
+struct PublicKeyCredentialUserEntity {
+    id: String,
+    name: String,
+    #[serde(rename = "displayName")]
+    display_name: String,
 }
 
 #[derive(Clone, Serialize, Deserialize, Debug)]
@@ -42,6 +50,7 @@ struct StoredCredential {
     credential_id: Vec<u8>,
     public_key: Vec<u8>,
     counter: u32,
+    user: PublicKeyCredentialUserEntity,
 }
 
 fn base64url_decode(input: &str) -> Result<Vec<u8>, base64::DecodeError> {

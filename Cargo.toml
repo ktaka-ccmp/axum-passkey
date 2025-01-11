@@ -14,6 +14,7 @@ oid-registry = { version = "0.7.1", features = ["crypto", "ms_spc", "x500", "x50
 ring = { version = "0.17.8", features = ["std"] }
 serde = { version = "1.0.215", features = ["derive"] }
 serde_json = "1.0.133"
+thiserror = "2.0.11"
 tokio = { version = "1.42.0", features = ["bytes", "fs", "io-std", "macros", "net", "parking_lot", "rt-multi-thread", "signal", "sync", "time", "tracing"] }
 uuid = { version = "1.11.0", features = ["atomic", "md5", "sha1", "v4"] }
 webpki = { version = "0.22.4", features = ["std"] }

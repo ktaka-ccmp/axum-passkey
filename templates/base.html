@@ -105,12 +105,19 @@
                 console.log('Registration options:', options);
 
                 // Convert base64url strings to Uint8Array
+                let userHandle = options.user.id;
                 options.challenge = base64URLToUint8Array(options.challenge);
                 options.user.id = new TextEncoder().encode(options.user.id);
+
+                console.log('Registration options:', options);
+                console.log('Registration user handle:', userHandle);
 
                 const credential = await navigator.credentials.create({
                     publicKey: options
                 });
+
+                // console.log('Registration credential:', credential);
+                // console.log('Registration credential response clientDataJSON:', credential.response.clientDataJSON);
 
                 const credentialResponse = {
                     id: credential.id,
@@ -120,8 +127,11 @@
                         attestation_object: arrayBufferToBase64URL(credential.response.attestationObject),
                         client_data_json: arrayBufferToBase64URL(credential.response.clientDataJSON)
                     },
-                    username: username
+                    user_handle: userHandle,
+                    // username: username
                 };
+
+                console.log('Registration response:', credentialResponse);
 
                 const finishResponse = await fetch('/register/finish', {
                     method: 'POST',
