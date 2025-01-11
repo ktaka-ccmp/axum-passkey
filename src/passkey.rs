@@ -12,6 +12,16 @@ use tokio::sync::Mutex;
 struct AppConfig {
     origin: String,
     rp_id: String,
+    authenticator_selection: AuthenticatorSelection,
+}
+
+#[derive(Serialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+struct AuthenticatorSelection {
+    authenticator_attachment: Option<String>,
+    resident_key: String,
+    user_verification: String,
+    require_resident_key: Option<bool>,
 }
 
 #[derive(Default)]
@@ -71,7 +81,24 @@ pub(crate) fn app_state() -> AppState {
         .unwrap()
         .to_string();
 
-    let config = AppConfig { origin, rp_id };
+    let authenticator_selection = AuthenticatorSelection {
+        // "platform", "cross-platform" or None.
+        // We prefer platform authenticators i.e. to use Google's password manager.
+        authenticator_attachment: Some("platform".to_string()),
+
+        // Discoverable credentials are supported by platform authenticators, so require it.
+        resident_key: "required".to_string(), // "required", "preferred", "discouraged"
+        require_resident_key: Some(true),     // true, false
+
+        // user verification doesn't necessarily improve security, because the attacker can change PIN once the password manager is compromised.
+        user_verification: "discouraged".to_string(), // "required", "preferred", "discouraged"
+    };
+
+    let config = AppConfig {
+        origin,
+        rp_id,
+        authenticator_selection,
+    };
 
     AppState {
         store: Arc::new(Mutex::new(AuthStore::default())),

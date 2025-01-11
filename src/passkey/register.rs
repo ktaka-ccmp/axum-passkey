@@ -11,7 +11,9 @@ use ring::rand::SecureRandom;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::passkey::{base64url_decode, AttestationObject, StoredChallenge, StoredCredential};
+use crate::passkey::{
+    base64url_decode, AttestationObject, AuthenticatorSelection, StoredChallenge, StoredCredential,
+};
 use crate::AppState;
 
 pub(crate) fn router(state: AppState) -> Router {
@@ -42,14 +44,6 @@ struct PubKeyCredParam {
     #[serde(rename = "type")]
     type_: String,
     alg: i32,
-}
-
-#[derive(Serialize, Debug)]
-#[serde(rename_all = "camelCase")]
-struct AuthenticatorSelection {
-    authenticator_attachment: Option<String>,
-    resident_key: String,
-    user_verification: String,
 }
 
 #[derive(Serialize, Debug)]
@@ -125,11 +119,7 @@ async fn start_registration(
             type_: "public-key".to_string(),
             alg: -7,
         }],
-        authenticator_selection: AuthenticatorSelection {
-            authenticator_attachment: None,
-            resident_key: "preferred".to_string(),
-            user_verification: "preferred".to_string(),
-        },
+        authenticator_selection: state.config.authenticator_selection.clone(),
         timeout: 60000,
         attestation: "direct".to_string(),
     };
@@ -152,7 +142,7 @@ async fn finish_registration(
 
     verify_client_data(&state, &reg_data, &store).await?;
 
-    let public_key = extract_credential_public_key(&reg_data)?;
+    let public_key = extract_credential_public_key(&reg_data, &state)?;
 
     // Decode and store credential
     let credential_id = base64url_decode(&reg_data.raw_id).map_err(|e| {
@@ -182,6 +172,7 @@ async fn finish_registration(
 
 fn extract_credential_public_key(
     reg_data: &RegisterCredential,
+    state: &AppState,
 ) -> Result<Vec<u8>, (StatusCode, String)> {
     let decoded_client_data =
         base64url_decode(&reg_data.response.client_data_json).map_err(|e| {
@@ -194,7 +185,7 @@ fn extract_credential_public_key(
     let attestation_obj = parse_attestation_object(&reg_data.response.attestation_object)?;
 
     // Verify attestation based on format
-    crate::passkey::attestation::verify_attestation(&attestation_obj, &decoded_client_data)?;
+    crate::passkey::attestation::verify_attestation(&attestation_obj, &decoded_client_data, state)?;
 
     // Extract public key from authenticator data
     let public_key = extract_public_key_from_auth_data(&attestation_obj.auth_data)?;
@@ -244,7 +235,10 @@ fn parse_attestation_object(
         }
 
         #[cfg(debug_assertions)]
-        println!("Attestation format: {:?}, auth data: {:?}, attestation statement: {:?}", fmt, auth_data, att_stmt);
+        println!(
+            "Attestation format: {:?}, auth data: {:?}, attestation statement: {:?}",
+            fmt, auth_data, att_stmt
+        );
 
         match (fmt, auth_data, att_stmt) {
             (Some(f), Some(d), Some(s)) => Ok(AttestationObject {

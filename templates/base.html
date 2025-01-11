@@ -50,16 +50,20 @@
                     publicKey: options
                 });
 
+                console.log('Authentication credential:', credential);
+
                 const authResponse = {
+                    auth_id: options.authId,
                     id: credential.id,
                     raw_id: arrayBufferToBase64URL(credential.rawId),
                     type: credential.type,
+                    authenticator_attachment: credential.authenticatorAttachment,
                     response: {
                         authenticator_data: arrayBufferToBase64URL(credential.response.authenticatorData),
                         client_data_json: arrayBufferToBase64URL(credential.response.clientDataJSON),
-                        signature: arrayBufferToBase64URL(credential.response.signature)
+                        signature: arrayBufferToBase64URL(credential.response.signature),
+                        user_handle: arrayBufferToBase64URL(credential.response.userHandle)
                     },
-                    auth_id: options.authId
                 };
 
                 console.log('Authentication response:', authResponse);
@@ -73,7 +77,7 @@
                 if (verifyResponse.ok) {
                     authStatus.textContent = "Welcome back!";
                     authStatus.style.display = "block";
-                    authActions.style.display = "none";
+                    // authActions.style.display = "none";
                 } else {
                     throw new Error('Server verification failed');
                 }

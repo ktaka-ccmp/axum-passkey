@@ -5,7 +5,8 @@ use std::time::SystemTime;
 use webpki::EndEntityCert;
 use x509_parser::{certificate::X509Certificate, prelude::*, time::ASN1Time};
 
-use crate::passkey::AttestationObject;
+// use crate::passkey::AttestationObject;
+use crate::passkey::{AppState, AttestationObject, AuthenticatorSelection};
 
 // Constants for FIDO OIDs id-fido-gen-ce-aaguid
 const OID_FIDO_GEN_CE_AAGUID: &str = "1.3.6.1.4.1.45724.1.1.4";
@@ -17,30 +18,111 @@ const COORD_LENGTH: usize = 32;
 pub(super) fn verify_attestation(
     attestation: &AttestationObject,
     client_data: &[u8],
+    state: &AppState,
 ) -> Result<(), (StatusCode, String)> {
     let client_data_hash = digest::digest(&digest::SHA256, client_data);
 
     match attestation.fmt.as_str() {
         "none" => {
+            // for platform authenticators
+            #[cfg(debug_assertions)]
             println!("Using 'none' attestation format");
-            Ok(())
-        }
-        "packed" => verify_packed_attestation(
-            &attestation.auth_data,
-            client_data_hash.as_ref(),
-            &attestation.att_stmt,
-        )
-        .map_err(|e| {
-            (
-                StatusCode::BAD_REQUEST,
-                format!("Attestation verification failed: {:?}", e),
+            verify_none_attestation(
+                attestation,
+                &state.config.authenticator_selection,
+                &state.config.rp_id,
             )
-        }),
+        }
+        "packed" => {
+            // for security keys
+            #[cfg(debug_assertions)]
+            println!("Using 'packed' attestation format");
+            verify_packed_attestation(
+                &attestation.auth_data,
+                client_data_hash.as_ref(),
+                &attestation.att_stmt,
+            )
+            .map_err(|e| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    format!("Attestation verification failed: {:?}", e),
+                )
+            })
+        }
         _ => Err((
             StatusCode::BAD_REQUEST,
             "Unsupported attestation format".to_string(),
         )),
     }
+}
+
+fn verify_none_attestation(
+    attestation: &AttestationObject,
+    authenticator_selection: &AuthenticatorSelection,
+    rp_id: &str,
+) -> Result<(), (StatusCode, String)> {
+    // Verify attStmt is empty
+    if !attestation.att_stmt.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "attStmt must be empty for none attestation".into(),
+        ));
+    }
+
+    // Verify RP ID hash
+    let rp_id_hash = digest::digest(&digest::SHA256, rp_id.as_bytes());
+    if attestation.auth_data[..32] != rp_id_hash.as_ref()[..] {
+        return Err((StatusCode::BAD_REQUEST, "Invalid RP ID hash".into()));
+    }
+
+    // Check flags
+    let flags = attestation.auth_data[32];
+    let user_present = (flags & 0x01) != 0;
+    let user_verified = (flags & 0x04) != 0;
+    let has_attested_cred_data = (flags & 0x40) != 0;
+
+    if !user_present {
+        return Err((StatusCode::BAD_REQUEST, "User Present flag not set".into()));
+    }
+
+    // Check UV flag if requested
+    if authenticator_selection.user_verification == "required" && !user_verified {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "User Verification required but flag not set".into(),
+        ));
+    }
+
+    if !has_attested_cred_data {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "No attested credential data".into(),
+        ));
+    }
+
+    // Extract AAGUID (starts at byte 37, 16 bytes long)
+    let aaguid = &attestation.auth_data[37..53];
+    #[cfg(debug_assertions)]
+    println!("AAGUID: {:?}", aaguid);
+
+    // Verify credential public key format
+    let mut pos = 55; // After AAGUID and 2-byte credential ID length
+    let cred_id_len =
+        ((attestation.auth_data[53] as usize) << 8) | (attestation.auth_data[54] as usize);
+    pos += cred_id_len;
+
+    // Verify COSE key format
+    let public_key_cbor: CborValue = ciborium::de::from_reader(&attestation.auth_data[pos..])
+        .map_err(|e| {
+            (
+                StatusCode::BAD_REQUEST,
+                format!("Invalid public key CBOR: {}", e),
+            )
+        })?;
+
+    extract_public_key_coords(&public_key_cbor).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+
+    Ok(())
 }
 
 fn verify_packed_attestation(

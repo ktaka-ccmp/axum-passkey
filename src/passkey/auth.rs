@@ -68,13 +68,14 @@ struct AllowCredential {
 
 #[allow(unused)]
 #[derive(Deserialize, Debug)]
-struct AuthenticateCredential {
+struct AuthenticatorResponse {
     id: String,
     raw_id: String,
     response: AuthenticatorAssertionResponse,
     #[serde(rename = "type")]
     type_: String,
     auth_id: String,
+    authenticator_attachment: Option<String>,
 }
 
 #[derive(Deserialize, Debug)]
@@ -82,6 +83,7 @@ struct AuthenticatorAssertionResponse {
     authenticator_data: String,
     client_data_json: String,
     signature: String,
+    user_handle: Option<String>,
 }
 
 async fn start_authentication(State(state): State<AppState>) -> Json<AuthenticationOptions> {
@@ -118,7 +120,11 @@ async fn start_authentication(State(state): State<AppState>) -> Json<Authenticat
         timeout: 60000,
         rp_id: state.config.rp_id.clone(),
         allow_credentials,
-        user_verification: "preferred".to_string(),
+        user_verification: state
+            .config
+            .authenticator_selection
+            .user_verification
+            .clone(),
         auth_id,
     };
 
@@ -129,98 +135,106 @@ async fn start_authentication(State(state): State<AppState>) -> Json<Authenticat
 
 async fn verify_authentication(
     State(state): State<AppState>,
-    Json(auth_data): Json<AuthenticateCredential>,
+    Json(auth_response): Json<AuthenticatorResponse>,
 ) -> Result<&'static str, (StatusCode, String)> {
+    // Client response format
+    // const authResponse = {
+    //     auth_id: options.authId,
+    //     id: credential.id,
+    //     raw_id: arrayBufferToBase64URL(credential.rawId),
+    //     type: credential.type,
+    //     authenticator_attachment: credential.authenticatorAttachment,
+    //     response: {
+    //         authenticator_data: arrayBufferToBase64URL(credential.response.authenticatorData),
+    //         client_data_json: arrayBufferToBase64URL(credential.response.clientDataJSON),
+    //         signature: arrayBufferToBase64URL(credential.response.signature),
+    //         user_handle: arrayBufferToBase64URL(credential.response.userHandle)
+    //     },
+    // };
+
     #[cfg(debug_assertions)]
-    println!("Authenticating user: {:?}", auth_data);
+    println!("Authenticating user: {:?}", auth_response);
 
     let mut store = state.store.lock().await;
 
-    // Retrieve the stored challenge
-    let stored_challenge = store.challenges.get(&auth_data.auth_id).ok_or((
-        StatusCode::BAD_REQUEST,
-        "No stored challenge for this auth_id".to_string(),
-    ))?;
+    // Decode clientDataJSON
+    let (decoded_client_data, client_data) = parse_client_data(&auth_response)?;
 
-    #[cfg(debug_assertions)]
-    println!(
-        "Stored challenge: {:?}",
-        URL_SAFE.encode(&stored_challenge.challenge)
-    );
+    // Verify challenge, origin, type, and authenticator attachment are correct
+    let _ = verify_params(&state, &auth_response, &store, client_data).await?;
 
-    // Decode clientData, parse out the "challenge"
-    let decoded_client_data =
-        base64url_decode(&auth_data.response.client_data_json).map_err(|e| {
-            (
-                StatusCode::BAD_REQUEST,
-                format!("Failed to decode client data: {}", e),
-            )
-        })?;
-
-    let client_data_str = String::from_utf8(decoded_client_data.clone()).map_err(|e| {
-        (
-            StatusCode::BAD_REQUEST,
-            format!("Client data is not valid UTF-8: {}", e),
-        )
-    })?;
-
-    let client_data: serde_json::Value = serde_json::from_str(&client_data_str).map_err(|e| {
-        (
-            StatusCode::BAD_REQUEST,
-            format!("Invalid client data JSON: {}", e),
-        )
-    })?;
-
-    #[cfg(debug_assertions)]
-    println!("Client data: {:?}", client_data);
-
-    let challenge_str = client_data["challenge"].as_str().ok_or((
-        StatusCode::BAD_REQUEST,
-        "Missing challenge in client data".to_string(),
-    ))?;
-
-    let decoded_challenge = base64url_decode(challenge_str).map_err(|e| {
-        (
-            StatusCode::BAD_REQUEST,
-            format!("Failed to decode challenge: {}", e),
-        )
-    })?;
-
-    if decoded_challenge != stored_challenge.challenge {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            "Challenge verification failed".to_string(),
-        ));
-    }
-
-    // Verify origin and type
-    let origin = client_data["origin"].as_str().ok_or((
-        StatusCode::BAD_REQUEST,
-        "Missing origin in client data".to_string(),
-    ))?;
-
-    if origin != state.config.origin {
-        return Err((StatusCode::BAD_REQUEST, "Invalid origin".to_string()));
-    }
-
-    let type_ = client_data["type"].as_str().ok_or((
-        StatusCode::BAD_REQUEST,
-        "Missing type in client data".to_string(),
-    ))?;
-
-    if type_ != "webauthn.get" {
-        return Err((StatusCode::BAD_REQUEST, "Invalid type".to_string()));
-    }
-
-    // Verify authenticator data
     let authenticator_data =
-        base64url_decode(&auth_data.response.authenticator_data).map_err(|e| {
+        base64url_decode(&auth_response.response.authenticator_data).map_err(|e| {
             (
                 StatusCode::BAD_REQUEST,
                 format!("Failed to decode authenticator data: {}", e),
             )
         })?;
 
+    // Verify rpIdHash, user presence, and user verification flags
+    let _ = verify_authenticator_data(&state, &authenticator_data)?;
+
+    let public_key = get_public_key(&auth_response.id, &store).await?;
+
+    let signature = base64url_decode(&auth_response.response.signature).map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            format!("Failed to decode signature: {}", e),
+        )
+    })?;
+    #[cfg(debug_assertions)]
+    println!("Signature: {:?}", URL_SAFE.encode(&signature));
+
+    // Verify signature
+    let _ = verify_signature(
+        &signature,
+        decoded_client_data,
+        authenticator_data,
+        public_key,
+    )?;
+
+    store.challenges.remove(&auth_response.auth_id);
+    Ok("Authentication successful")
+}
+
+fn verify_signature(
+    signature: &Vec<u8>,
+    decoded_client_data: Vec<u8>,
+    authenticator_data: Vec<u8>,
+    public_key: UnparsedPublicKey<&Vec<u8>>,
+) -> Result<(), (StatusCode, String)> {
+    let client_data_hash = digest::digest(&digest::SHA256, &decoded_client_data);
+    let mut signed_data = Vec::new();
+    signed_data.extend_from_slice(&authenticator_data);
+    signed_data.extend_from_slice(client_data_hash.as_ref());
+    #[cfg(debug_assertions)]
+    println!("Signed data: {:?}", URL_SAFE.encode(&signed_data));
+
+    public_key
+        .verify(&signed_data, &signature)
+        .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid signature".to_string()))?;
+    Ok(())
+}
+
+async fn get_public_key<'a>(
+    credential_id: &str,
+    store: &'a tokio::sync::MutexGuard<'_, super::AuthStore>,
+) -> Result<UnparsedPublicKey<&'a Vec<u8>>, (StatusCode, String)> {
+    let credential = store
+        .credentials
+        .get(credential_id)
+        .ok_or((StatusCode::BAD_REQUEST, "Unknown credential".to_string()))?;
+    let verification_algorithm = &ring::signature::ECDSA_P256_SHA256_ASN1;
+    let public_key = UnparsedPublicKey::new(verification_algorithm, &credential.public_key);
+    #[cfg(debug_assertions)]
+    println!("Public key: {:?}", URL_SAFE.encode(&credential.public_key));
+    Ok(public_key)
+}
+
+fn verify_authenticator_data(
+    state: &AppState,
+    authenticator_data: &Vec<u8>,
+) -> Result<(), (StatusCode, String)> {
     let rp_id_hash = digest::digest(&digest::SHA256, state.config.rp_id.as_bytes());
     if authenticator_data[..32] != rp_id_hash.as_ref()[..] {
         return Err((
@@ -228,7 +242,6 @@ async fn verify_authentication(
             "Invalid RP ID hash in authenticator data".to_string(),
         ));
     }
-
     let flags = authenticator_data[32];
     if flags & 0x01 != 0x01 {
         return Err((
@@ -236,48 +249,102 @@ async fn verify_authentication(
             "User presence flag not set".to_string(),
         ));
     }
-
+    if state.config.authenticator_selection.user_verification == "required" && flags & 0x04 != 0x04
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "User verification flag not set".to_string(),
+        ));
+    }
     #[cfg(debug_assertions)]
     println!(
         "authenticator_data: {:?}",
         URL_SAFE.encode(&authenticator_data)
     );
+    Ok(())
+}
 
-    // Verify signature
-    let client_data_hash = digest::digest(&digest::SHA256, &decoded_client_data);
-
-    let mut signed_data = Vec::new();
-    signed_data.extend_from_slice(&authenticator_data);
-    signed_data.extend_from_slice(client_data_hash.as_ref());
-
+async fn verify_params(
+    state: &AppState,
+    auth_response: &AuthenticatorResponse,
+    store: &tokio::sync::MutexGuard<'_, super::AuthStore>,
+    client_data: serde_json::Value,
+) -> Result<(), (StatusCode, String)> {
+    let stored_challenge = store.challenges.get(&auth_response.auth_id).ok_or((
+        StatusCode::BAD_REQUEST,
+        "No stored challenge for this auth_id".to_string(),
+    ))?;
     #[cfg(debug_assertions)]
-    println!("Signed data: {:?}", URL_SAFE.encode(&signed_data));
-
-    let signature = base64url_decode(&auth_data.response.signature).map_err(|e| {
+    println!(
+        "Stored challenge: {:?}",
+        URL_SAFE.encode(&stored_challenge.challenge)
+    );
+    let challenge_str = client_data["challenge"].as_str().ok_or((
+        StatusCode::BAD_REQUEST,
+        "Missing challenge in client data".to_string(),
+    ))?;
+    let decoded_challenge = base64url_decode(challenge_str).map_err(|e| {
         (
             StatusCode::BAD_REQUEST,
-            format!("Failed to decode signature: {}", e),
+            format!("Failed to decode challenge: {}", e),
         )
     })?;
+    if decoded_challenge != stored_challenge.challenge {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Challenge verification failed".to_string(),
+        ));
+    }
+    let origin = client_data["origin"].as_str().ok_or((
+        StatusCode::BAD_REQUEST,
+        "Missing origin in client data".to_string(),
+    ))?;
+    if origin != state.config.origin {
+        return Err((StatusCode::BAD_REQUEST, "Invalid origin".to_string()));
+    }
+    let type_ = client_data["type"].as_str().ok_or((
+        StatusCode::BAD_REQUEST,
+        "Missing type in client data".to_string(),
+    ))?;
+    if type_ != "webauthn.get" {
+        return Err((StatusCode::BAD_REQUEST, "Invalid type".to_string()));
+    }
+    let expected = state
+        .config
+        .authenticator_selection
+        .authenticator_attachment
+        .as_deref();
+    let received = auth_response.authenticator_attachment.as_deref();
+    if expected != received {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Invalid authenticator attachment".to_string(),
+        ));
+    }
+    Ok(())
+}
 
-    #[cfg(debug_assertions)]
-    println!("Signature: {:?}", URL_SAFE.encode(&signature));
-
-    let credential = store
-        .credentials
-        .get(&auth_data.id)
-        .ok_or((StatusCode::BAD_REQUEST, "Unknown credential".to_string()))?;
-
-    let verification_algorithm = &ring::signature::ECDSA_P256_SHA256_ASN1;
-    let public_key = UnparsedPublicKey::new(verification_algorithm, &credential.public_key);
-
-    #[cfg(debug_assertions)]
-    println!("Public key: {:?}", URL_SAFE.encode(&credential.public_key));
-
-    public_key
-        .verify(&signed_data, &signature)
-        .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid signature".to_string()))?;
-
-    store.challenges.remove(&auth_data.auth_id);
-    Ok("Authentication successful")
+fn parse_client_data(
+    auth_response: &AuthenticatorResponse,
+) -> Result<(Vec<u8>, serde_json::Value), (StatusCode, String)> {
+    let decoded_client_data =
+        base64url_decode(&auth_response.response.client_data_json).map_err(|e| {
+            (
+                StatusCode::BAD_REQUEST,
+                format!("Failed to decode client data: {}", e),
+            )
+        })?;
+    let client_data_str = String::from_utf8(decoded_client_data.clone()).map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            format!("Client data is not valid UTF-8: {}", e),
+        )
+    })?;
+    let client_data: serde_json::Value = serde_json::from_str(&client_data_str).map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            format!("Invalid client data JSON: {}", e),
+        )
+    })?;
+    Ok((decoded_client_data, client_data))
 }
