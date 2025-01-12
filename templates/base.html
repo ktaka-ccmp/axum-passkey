@@ -75,7 +75,10 @@
                 });
 
                 if (verifyResponse.ok) {
-                    authStatus.textContent = "Welcome back!";
+                    // authStatus.textContent = "Welcome back!";
+                    verifyResponse.text().then(function(text) {
+                        authStatus.textContent = `Welcome back ${text} !`;
+                    });
                     authStatus.style.display = "block";
                     // authActions.style.display = "none";
                 } else {

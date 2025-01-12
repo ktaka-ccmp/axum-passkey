@@ -83,11 +83,11 @@ pub(crate) fn app_state() -> AppState {
 
     let origin = env::var("ORIGIN").expect("ORIGIN must be set");
     let rp_id = origin
-        .strip_prefix("https://")
-        .unwrap_or(&origin)
+        .trim_start_matches("https://")
+        .trim_start_matches("http://")
         .split(':')
         .next()
-        .unwrap()
+        .unwrap_or(&origin)
         .to_string();
 
     let authenticator_selection = AuthenticatorSelection {
