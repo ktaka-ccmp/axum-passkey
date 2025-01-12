@@ -15,3 +15,7 @@ Create .env file
 ```bash
 cargo run
 ```
+
+
+https://github.com/user-attachments/assets/b06460a9-1389-4b67-b96a-99d7c32bfb5a
+
