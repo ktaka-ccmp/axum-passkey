@@ -277,7 +277,7 @@ impl AuthenticatorData {
 async fn verify_authentication(
     State(state): State<AppState>,
     Json(auth_response): Json<AuthenticatorResponse>,
-) -> Result<&'static str, (StatusCode, String)> {
+) -> Result<String, (StatusCode, String)> {
     // Get stored challenge and verify auth
     let mut store = state.store.lock().await;
     let stored_challenge = store
@@ -334,6 +334,8 @@ async fn verify_authentication(
     #[cfg(debug_assertions)]
     println!("user_handle received from client: {:?}", &user_handle);
 
+    let display_name = credential.user.display_name.as_str().to_owned();
+
     if credential.user.id != user_handle {
         return Err(WebAuthnError::InvalidSignature("User handle mismatch".into()).into());
     }
@@ -360,5 +362,5 @@ async fn verify_authentication(
     // Cleanup and return success
     store.challenges.remove(&auth_response.auth_id);
 
-    Ok("Authentication successful")
+    Ok(display_name)
 }
