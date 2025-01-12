@@ -1,9 +1,17 @@
-= Readme
-:toc:
+# Readme
 
-== Environment Variables
+Table of Contents
 
-.env 
-....
-ORIGIN='https://p3002.h.ccmp.jp'
-....
+- [Environment Variables](#environment-variables)
+
+## Environment Variables
+
+Create .env file
+
+```text
+#ORIGIN='http://localhost:3001'
+```
+
+```bash
+cargo run
+```
