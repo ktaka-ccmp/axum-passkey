@@ -7,13 +7,11 @@ use axum::{
 
 use base64::engine::{general_purpose::URL_SAFE, Engine};
 use ciborium::value::{Integer, Value as CborValue};
-use ring::rand::SecureRandom;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::passkey::{
-    base64url_decode, AttestationObject, AuthenticatorSelection, PublicKeyCredentialUserEntity,
-    StoredChallenge, StoredCredential,
+    base64url_decode, generate_challenge, AttestationObject, AuthenticatorSelection, PublicKeyCredentialUserEntity, StoredChallenge, StoredCredential
 };
 use crate::AppState;
 
@@ -88,8 +86,7 @@ async fn start_registration(
         display_name: username.clone(),
     };
 
-    let mut challenge = vec![0u8; 32];
-    state.rng.fill(&mut challenge).unwrap();
+    let challenge = generate_challenge();
 
     let stored_challenge = StoredChallenge {
         challenge: challenge.clone(),
