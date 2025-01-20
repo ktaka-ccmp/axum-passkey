@@ -2,28 +2,41 @@
 
 Table of Contents
 
-- [Readme](#readme)
+- [blog](#blog)
+- [Recorded screen](#recorded-screen)
+- [Howto](#howto)
+  - [Clone repository](#clone-repository)
   - [Environment Variables](#environment-variables)
-  - [Recorded screen](#recorded-screen)
-  - [blog](#blog)
+  - [Run](#run)
 
-## Environment Variables
+## blog
 
-Create .env file
-
-```text
-#ORIGIN='http://localhost:3001'
-```
-
-```bash
-cargo run
-```
+Wrote [a blog post](https://ktaka.blog.ccmp.jp/2025/01/implementing-passkeys-authentication-in-rust-axum.html) about this repository
 
 ## Recorded screen
 
 https://github.com/user-attachments/assets/b06460a9-1389-4b67-b96a-99d7c32bfb5a
 
 
-## blog
+## Howto
 
-Wrote [a blog post](https://ktaka.blog.ccmp.jp/2025/01/implementing-passkeys-authentication-in-rust-axum.html) about this repository
+### Clone repository
+
+```bash
+git clone https://github.com/ktaka-ccmp/axum-passkey.git
+cd axum-passkey
+```
+
+### Environment Variables
+
+Create .env file
+
+```text
+ORIGIN='http://localhost:3001'
+```
+
+### Run
+
+```bash
+cargo run
+```
