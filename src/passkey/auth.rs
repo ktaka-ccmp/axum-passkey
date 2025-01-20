@@ -27,12 +27,12 @@ use axum::{
 };
 
 use base64::engine::{general_purpose::URL_SAFE, Engine};
-use ring::{digest, rand::SecureRandom, signature::UnparsedPublicKey};
+use ring::{digest, signature::UnparsedPublicKey};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use uuid::Uuid;
 
-use crate::passkey::{base64url_decode, AppState, PublicKeyCredentialUserEntity, StoredChallenge};
+use crate::passkey::{base64url_decode, generate_challenge, AppState, PublicKeyCredentialUserEntity, StoredChallenge};
 
 pub(crate) fn router(state: AppState) -> Router {
     Router::new()
@@ -88,8 +88,7 @@ struct AuthenticatorAssertionResponse {
 }
 
 async fn start_authentication(State(state): State<AppState>) -> Json<AuthenticationOptions> {
-    let mut challenge = vec![0u8; 32];
-    state.rng.fill(&mut challenge).unwrap();
+    let challenge = generate_challenge();
 
     let user_info = PublicKeyCredentialUserEntity {
         id: "".to_string(),

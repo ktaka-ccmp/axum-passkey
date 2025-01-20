@@ -1,7 +1,7 @@
 use base64::engine::{general_purpose::URL_SAFE, Engine};
 use ciborium::value::Value as CborValue;
 use dotenv::dotenv;
-use ring::rand;
+use ring::rand::SecureRandom;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::env;
@@ -59,6 +59,13 @@ fn base64url_decode(input: &str) -> Result<Vec<u8>, base64::DecodeError> {
     URL_SAFE.decode(padded)
 }
 
+fn generate_challenge() -> Vec<u8> {
+    let rng = ring::rand::SystemRandom::new();
+    let mut challenge = vec![0u8; 32];
+    rng.fill(&mut challenge).expect("Failed to generate random challenge");
+    challenge
+}
+
 #[derive(Debug)]
 struct AttestationObject {
     fmt: String,
@@ -74,7 +81,6 @@ pub(crate) mod register;
 #[derive(Clone)]
 pub(crate) struct AppState {
     store: Arc<Mutex<AuthStore>>,
-    rng: Arc<rand::SystemRandom>,
     config: AppConfig,
 }
 
@@ -112,7 +118,6 @@ pub(crate) fn app_state() -> AppState {
 
     AppState {
         store: Arc::new(Mutex::new(AuthStore::default())),
-        rng: Arc::new(rand::SystemRandom::new()),
         config,
     }
 }
