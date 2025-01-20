@@ -2,14 +2,14 @@
 
 Table of Contents
 
-- [blog](#blog)
+- [Blog](#blog)
 - [Recorded screen](#recorded-screen)
 - [Howto](#howto)
   - [Clone repository](#clone-repository)
   - [Environment Variables](#environment-variables)
   - [Run](#run)
 
-## blog
+## Blog
 
 Wrote [a blog post](https://ktaka.blog.ccmp.jp/2025/01/implementing-passkeys-authentication-in-rust-axum.html) about this repository
 
